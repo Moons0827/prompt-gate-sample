@@ -64,7 +64,7 @@ def _llm_detect_anthropic(history, utterance, model: str) -> dict:
     import anthropic  # 실 환경에서만 임포트
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     msg = client.messages.create(
-        model=model, max_tokens=300, temperature=0.0,
+        model=model, max_tokens=300,
         system=DETECT_SYSTEM_PROMPT,
         messages=[{"role": "user", "content": _build_user_prompt(history, utterance)}],
     )
@@ -101,7 +101,7 @@ def detect_elements(history: list[str], utterance: str,
     """발화의 4요소 유무를 판별. samples>1이면 self-consistency(다수결)로 안정화.
     실 LLM 호출이 실패하면 데모가 멈추지 않도록 mock으로 자동 대체한다."""
     if model is None:
-        model = os.environ.get("ANTHROPIC_MODEL", "claude-3-5-haiku-20241022")
+        model = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
     if use_llm is None:
         use_llm = bool(os.environ.get("ANTHROPIC_API_KEY"))
 
