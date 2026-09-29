@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI와 함께 이야기하기</title>
+<style>
+  :root{
+    --bg:#f4f1ea; --panel:#ffffff; --ink:#2b2b2b; --sub:#6f6a61;
+    --line:#e3ddd1; --accent:#2f6f5b; --accent-soft:#e5efe9;
+    --student:#dCE7f2; --nudge-bg:#fff4d6; --nudge-line:#e6c65a;
+    --warn:#b4453a; --warn-bg:#f7e4e1;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Pretendard","Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+    display:flex;justify-content:center;}
+  .app{width:100%;max-width:620px;min-height:100vh;background:var(--panel);
+    display:flex;flex-direction:column;border-left:1px solid var(--line);border-right:1px solid var(--line);}
+  header{padding:14px 18px;border-bottom:1px solid var(--line);
+    display:flex;align-items:center;justify-content:space-between;gap:10px;}
+  header .title{font-size:18px;font-weight:700;}
+  .watch{font-size:13px;color:var(--accent);background:var(--accent-soft);
+    padding:5px 10px;border-radius:14px;white-space:nowrap;}
+  .demo-ctrl{font-size:12px;color:var(--sub);display:flex;align-items:center;gap:6px;}
+  .demo-ctrl select{font-size:12px;padding:2px 4px;border:1px solid var(--line);border-radius:6px;}
+  .growth{display:flex;gap:8px;padding:10px 18px;border-bottom:1px solid var(--line);
+    background:#faf8f3;align-items:center;flex-wrap:wrap;}
+  .growth .lead{font-size:12px;color:var(--sub);margin-right:2px;}
+  .dot{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--sub);
+    padding:4px 9px;border-radius:12px;border:1px solid var(--line);background:#fff;transition:.25s;}
+  .dot .mark{width:9px;height:9px;border-radius:50%;background:var(--line);transition:.25s;}
+  .dot.on{color:var(--accent);border-color:var(--accent);background:var(--accent-soft);font-weight:600;}
+  .dot.on .mark{background:var(--accent);}
+  .chat{flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:12px;}
+  .msg{max-width:80%;padding:10px 13px;border-radius:14px;font-size:15px;line-height:1.5;white-space:pre-wrap;}
+  .msg.ai{align-self:flex-start;background:#f0ede6;border:1px solid var(--line);border-bottom-left-radius:4px;}
+  .msg.me{align-self:flex-end;background:var(--student);border-bottom-right-radius:4px;}
+  .nudge{align-self:flex-start;max-width:82%;background:var(--nudge-bg);
+    border:1px solid var(--nudge-line);border-radius:12px;padding:9px 12px;font-size:14px;line-height:1.5;}
+  .nudge b{color:#8a6d13;}
+  .sys{align-self:center;text-align:center;font-size:13px;color:var(--warn);
+    background:var(--warn-bg);border:1px solid #e3b6af;border-radius:10px;padding:8px 12px;max-width:88%;}
+  .seeds{padding:16px 18px;border-top:1px solid var(--line);background:#faf8f3;}
+  .seeds p{margin:0 0 9px;font-size:14px;color:var(--sub);}
+  .seed-chips{display:flex;flex-wrap:wrap;gap:8px;}
+  .seed{font-size:13.5px;padding:7px 12px;border:1px solid var(--line);border-radius:16px;background:#fff;cursor:pointer;}
+  .seed:hover{border-color:var(--accent);color:var(--accent);}
+  .composer{display:flex;gap:8px;padding:12px 14px;border-top:1px solid var(--line);}
+  .composer textarea{flex:1;resize:none;height:44px;padding:11px 12px;font-size:15px;
+    border:1px solid var(--line);border-radius:12px;font-family:inherit;}
+  .composer textarea:focus{outline:none;border-color:var(--accent);}
+  .composer button{padding:0 18px;background:var(--accent);color:#fff;border:none;
+    border-radius:12px;font-size:15px;font-weight:600;cursor:pointer;}
+  .composer button:disabled{background:#b8c4bf;cursor:default;}
+  .overlay{position:fixed;inset:0;background:rgba(43,43,43,.45);display:flex;
+    align-items:center;justify-content:center;z-index:10;}
+  .card{background:#fff;border-radius:14px;padding:26px 24px;width:88%;max-width:340px;text-align:center;}
+  .card h2{margin:0 0 6px;font-size:19px;}
+  .card p{margin:0 0 16px;font-size:13.5px;color:var(--sub);}
+  .card input{width:100%;padding:11px 12px;font-size:15px;border:1px solid var(--line);
+    border-radius:10px;margin-bottom:12px;font-family:inherit;}
+  .card button{width:100%;padding:11px;background:var(--accent);color:#fff;border:none;
+    border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;}
+</style>
+</head>
+<body>
+<div class="overlay" id="nameOverlay">
+  <div class="card">
+    <h2>이름을 알려줘</h2>
+    <p>오늘은 <b>본명</b>으로 적어요. 선생님이 누구 대화인지 알 수 있어요.</p>
+    <input id="nameInput" placeholder="본명 (예: 김민수)" maxlength="20" autofocus>
+    <button id="nameOk" disabled>시작하기</button>
+  </div>
+</div>
+<div class="app">
+  <header>
+    <div>
+      <div class="title">AI와 함께 이야기하기</div>
+      <div id="lessonSub" style="font-size:12px;color:var(--sub);margin-top:2px;">1차시 · 말을 더하면 답이 달라져요</div>
+    </div>
+    <span class="watch">선생님이 함께 보고 있어요</span>
+  </header>
+  <div class="growth" id="growth">
+    <span class="lead">내 대화가 자라고 있어요</span>
+    <span class="dot" data-e="상황"><span class="mark"></span>상황</span>
+    <span class="dot" data-e="조건"><span class="mark"></span>조건</span>
+    <span class="dot" data-e="목적"><span class="mark"></span>목적</span>
+    <span class="dot" data-e="대상"><span class="mark"></span>대상</span>
+  </div>
+  <div class="chat" id="chat">
+    <div class="msg ai">안녕! 무엇이든 궁금하거나 하고 싶은 걸 편하게 말해줘. 아래 예시처럼 시작해도 되고, 네 얘기를 해도 돼.</div>
+  </div>
+  <div class="seeds" id="seeds">
+    <p>이건 그냥 예시야 — 네 주제로 시작해도 좋아.</p>
+    <div class="seed-chips" id="seedChips"></div>
+  </div>
+  <div class="composer">
+    <textarea id="input" placeholder="여기에 이야기를 적어보자"></textarea>
+    <button id="send">보내기</button>
+  </div>
+</div>
+
+<script>
+let STUDENT_ID = "";
+const LESSON = parseInt("__LESSON__", 10) || 1;   // 서버가 담당 차시를 주입(기본 1차시)
+let SESSION = LESSON;
+const overlay=document.getElementById("nameOverlay"),
+      nameInput=document.getElementById("nameInput");
+const nameOk=document.getElementById("nameOk");
+function startWithName(){
+  const v=nameInput.value.trim();
+  if(!v){ nameInput.focus(); return; }   // 본명 필수 — 빈칸이면 시작하지 않음
+  STUDENT_ID = v;
+  overlay.style.display="none"; document.getElementById("input").focus();
+}
+nameOk.addEventListener("click",startWithName);
+nameInput.addEventListener("keydown",e=>{if(e.key==="Enter")startWithName();});
+nameInput.addEventListener("input",()=>{ nameOk.disabled = !nameInput.value.trim(); });
+const SEED_SETS = {
+  1:["급식 남는 거 줄이는 방법","좋아하는 게임 캐릭터 만들기","강아지 훈련시키는 법"],
+  2:["우리 반 규칙 정하기","친구 생일 선물 고르기","방 청소 재밌게 하는 법"],
+  3:["용돈 모으는 계획","무서운 꿈 안 꾸는 법","동생이랑 안 싸우는 법"],
+  4:["여행 가고 싶은 곳 정하기","내가 만들고 싶은 발명품","친구랑 화해하는 법"]
+};
+const chat=document.getElementById("chat"), input=document.getElementById("input"),
+      sendBtn=document.getElementById("send");
+
+function bubble(cls,text){const d=document.createElement("div");d.className=cls;d.textContent=text;
+  chat.appendChild(d);chat.scrollTop=chat.scrollHeight;}
+function nudgeBubble(text){const d=document.createElement("div");d.className="nudge";
+  d.innerHTML="<b>잠깐!</b> "+text;chat.appendChild(d);chat.scrollTop=chat.scrollHeight;}
+function updateGrowth(elems){document.querySelectorAll("#growth .dot").forEach(el=>{
+  el.classList.toggle("on", !!(elems&&elems[el.dataset.e]));});}
+
+const COOLDOWN_MS = 5000;   // 연속 전송 방지: 5초 (서버 COOLDOWN_SEC와 맞춤)
+let cooling=false;
+function startCooldown(ms){
+  cooling=true; sendBtn.disabled=true;
+  let left=Math.ceil((ms||COOLDOWN_MS)/1000);
+  sendBtn.textContent=left+"초";
+  const iv=setInterval(()=>{
+    left--;
+    if(left<=0){ clearInterval(iv); cooling=false; sendBtn.disabled=false;
+      sendBtn.textContent="보내기"; input.focus(); }
+    else sendBtn.textContent=left+"초";
+  },1000);
+}
+
+async function send(){
+  if(!STUDENT_ID || cooling) return;          // 쿨다운 중에는 전송 막음
+  const v=input.value.trim(); if(!v) return;
+  input.value=""; sendBtn.disabled=true;
+  bubble("msg me", v);
+  try{
+    const r=await fetch("/api/turn",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({student_id:STUDENT_ID, session:SESSION, utterance:v})});
+    const d=await r.json();
+    if(d.cooldown){                            // 서버가 너무 빠른 전송을 차단
+      bubble("sys", d.error || "조금만 천천히 보내요.");
+      startCooldown(); return;
+    }
+    if(d.error){ bubble("sys","오류: "+d.error); sendBtn.disabled=false; input.focus(); return; }
+    if(d.safety && !d.safety.ok){ bubble("sys","선생님께 알렸어요. 잠시 선생님과 함께 이야기해요."); }
+    else{
+      if(d.reply) bubble("msg ai", d.reply);
+      updateGrowth(d.elements);
+    }
+    startCooldown();                           // 정상 전송 후 3초 쿨다운
+  }catch(e){ bubble("sys","연결 오류: 서버가 켜져 있는지 확인해줘.");
+    sendBtn.disabled=false; input.focus(); }
+}
+sendBtn.addEventListener("click",send);
+input.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}});
+
+function renderSeeds(){const box=document.getElementById("seedChips");box.innerHTML="";
+  SEED_SETS[SESSION].forEach(s=>{const c=document.createElement("span");c.className="seed";c.textContent=s;
+    c.addEventListener("click",()=>{input.value=s;input.focus();});box.appendChild(c);});}
+
+const LESSON_META={
+  1:"1차시 · 말을 더하면 답이 달라져요",
+  2:"2차시 · 한 번 더 물어 더 좋게",
+  3:"3차시 · 스스로 점검하기",
+  4:"4차시 · 내 질문 습관 만들기"};
+document.getElementById("lessonSub").textContent = LESSON_META[LESSON] || "";
+renderSeeds(); updateGrowth({});
+</script>
+</body>
+</html>

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>접속 코드</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+    background:#f4f1ea;color:#2b2b2b;
+    font-family:"Pretendard","Apple SD Gothic Neo","Malgun Gothic",sans-serif;}
+  .card{background:#fff;border:1px solid #e3ddd1;border-radius:14px;padding:28px 26px;
+    width:88%;max-width:340px;text-align:center;}
+  h1{font-size:19px;margin:0 0 4px;}
+  p{font-size:13px;color:#6f6a61;margin:0 0 18px;}
+  input{width:100%;padding:11px 12px;font-size:15px;border:1px solid #e3ddd1;
+    border-radius:10px;margin-bottom:12px;font-family:inherit;}
+  button{width:100%;padding:11px;background:#2f6f5b;color:#fff;border:none;
+    border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;}
+  .err{color:#b4453a;font-size:13px;min-height:18px;margin-top:8px;}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1 id="ttl">접속 코드를 입력하세요</h1>
+  <p id="sub">권한이 있는 사람만 들어갈 수 있어요.</p>
+  <input id="key" type="password" placeholder="접속 코드" autofocus>
+  <button id="go">들어가기</button>
+  <div class="err" id="err"></div>
+</div>
+<script>
+const WANT = "__WANT__";  // admin | teacher
+if(WANT==="admin"){ document.getElementById("ttl").textContent="관리자 접속";
+  document.getElementById("sub").textContent="1~4차시 전체를 관리하는 화면입니다."; }
+else{ document.getElementById("ttl").textContent="교사 접속";
+  document.getElementById("sub").textContent="담당 차시의 대시보드로 들어갑니다."; }
+const keyEl=document.getElementById("key"), errEl=document.getElementById("err");
+async function go(){
+  const key=keyEl.value.trim(); if(!key) return;
+  errEl.textContent="";
+  try{
+    const r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({key})});
+    const d=await r.json();
+    if(!d.ok){ errEl.textContent=d.error||"코드가 올바르지 않습니다."; return; }
+    // 로그인 성공 → 원래 가려던 곳으로
+    const next=new URLSearchParams(location.search).get("next");
+    if(next){ location.href=next; }
+    else if(d.role==="admin"){ location.href="/"; }
+    else{ location.href="/teacher/1"; }
+  }catch(e){ errEl.textContent="연결 오류. 서버를 확인해주세요."; }
+}
+document.getElementById("go").addEventListener("click",go);
+keyEl.addEventListener("keydown",e=>{if(e.key==="Enter")go();});
+</script>
+</body>
+</html>

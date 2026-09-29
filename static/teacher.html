@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>교사 대시보드 — AI 대화 관찰</title>
+<style>
+  :root{
+    --bg:#f4f1ea; --panel:#fff; --ink:#2b2b2b; --sub:#6f6a61; --line:#e3ddd1;
+    --now:#b4453a; --now-bg:#f7e4e1; --warn:#b07d16; --warn-bg:#fbf1d6;
+    --ok:#2f6f5b; --ok-bg:#e9f1ec;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Pretendard","Apple SD Gothic Neo","Malgun Gothic",sans-serif;}
+  .wrap{max-width:960px;margin:0 auto;padding:20px 18px;}
+  h1{font-size:20px;margin:0 0 2px;}
+  .subtitle{font-size:13px;color:var(--sub);margin-bottom:16px;}
+  .counts{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap;}
+  .count{flex:1;min-width:120px;background:var(--panel);border:1px solid var(--line);
+    border-radius:10px;padding:12px 14px;}
+  .count .n{font-size:26px;font-weight:700;}
+  .count .l{font-size:12px;color:var(--sub);}
+  .count.now .n{color:var(--now);} .count.warn .n{color:var(--warn);} .count.ok .n{color:var(--ok);}
+
+  table{width:100%;border-collapse:collapse;background:var(--panel);
+    border:1px solid var(--line);border-radius:10px;overflow:hidden;}
+  th,td{padding:10px 12px;text-align:left;font-size:13.5px;border-bottom:1px solid var(--line);}
+  th{background:#faf8f3;color:var(--sub);font-weight:600;font-size:12.5px;}
+  tr:last-child td{border-bottom:none;}
+  td.state{font-weight:700;white-space:nowrap;}
+  tr.now td.state{color:var(--now);} tr.warn td.state{color:var(--warn);} tr.ok td.state{color:var(--sub);font-weight:400;}
+  tr.now{background:var(--now-bg);} tr.warn{background:var(--warn-bg);}
+  .badge{display:inline-block;font-size:11.5px;padding:2px 7px;border-radius:10px;border:1px solid var(--line);color:var(--sub);}
+  .last{color:var(--sub);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  button.ack{font-size:12px;padding:4px 10px;border:1px solid var(--now);color:var(--now);
+    background:#fff;border-radius:8px;cursor:pointer;}
+  .empty{padding:30px;text-align:center;color:var(--sub);}
+  .foot{margin-top:12px;font-size:12px;color:var(--sub);}
+  tr.clickable{cursor:pointer;}
+  tr.clickable:hover{filter:brightness(0.98);}
+  .view{font-size:12px;color:var(--ok);text-decoration:underline;cursor:pointer;}
+  .modal{position:fixed;inset:0;background:rgba(43,43,43,.5);display:none;
+    align-items:center;justify-content:center;z-index:20;}
+  .modal.on{display:flex;}
+  .sheet{background:#fff;border-radius:12px;width:92%;max-width:640px;max-height:86vh;
+    display:flex;flex-direction:column;overflow:hidden;}
+  .sheet header{border-bottom:1px solid var(--line);}
+  .sheet .body{padding:16px 18px;overflow-y:auto;display:flex;flex-direction:column;gap:10px;}
+  .turn{display:flex;flex-direction:column;gap:5px;padding-bottom:10px;border-bottom:1px dashed var(--line);}
+  .u{align-self:flex-end;background:#dCE7f2;padding:8px 11px;border-radius:12px;max-width:80%;font-size:14px;}
+  .a{align-self:flex-start;background:#f0ede6;padding:8px 11px;border-radius:12px;max-width:80%;font-size:14px;}
+  .a.blocked{background:var(--now-bg);color:var(--now);}
+  .tags{font-size:11px;color:var(--sub);align-self:flex-start;}
+  .closeBtn{font-size:14px;padding:6px 12px;border:1px solid var(--line);background:#fff;border-radius:8px;cursor:pointer;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div style="display:flex;justify-content:space-between;align-items:flex-end;">
+    <div>
+      <h1><span id="scopeTtl">1차시</span> 교사 대시보드</h1>
+      <div class="subtitle">평소에는 지켜보고, 위험·정체 신호에만 개입합니다. 3초마다 자동 갱신. (이 차시만 보입니다)</div>
+    </div>
+    <button id="resetBtn" style="font-size:12px;padding:6px 12px;border:1px solid var(--line);
+      background:#fff;border-radius:8px;cursor:pointer;color:var(--sub);">실습 초기화</button>
+  </div>
+
+  <div class="counts">
+    <div class="count now"><div class="n" id="c-now">0</div><div class="l">즉시 — 안전 개입</div></div>
+    <div class="count warn"><div class="n" id="c-warn">0</div><div class="l">주의 — 반복 정체</div></div>
+    <div class="count ok"><div class="n" id="c-ok">0</div><div class="l">정상 진행</div></div>
+  </div>
+
+  <table>
+    <thead><tr>
+      <th>상태</th><th>학생</th><th>차시</th><th>주제</th><th>턴</th>
+      <th>요소</th><th>대화 유형</th><th>최근 발화</th><th></th>
+    </tr></thead>
+    <tbody id="rows"><tr><td class="empty" colspan="9">아직 접속한 학생이 없습니다.</td></tr></tbody>
+  </table>
+  <div class="foot">즉시=안전 위험(자동으로 학생 화면에서 AI를 멈추고 교사 호출) · 주의=반복 정체·요소 미진전 · 정상=관찰만 · 학생 줄을 클릭하면 대화 전문을 볼 수 있어요</div>
+</div>
+
+<div class="modal" id="modal">
+  <div class="sheet">
+    <header style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;">
+      <b id="mTitle">대화 전문</b>
+      <button class="closeBtn" onclick="closeModal()">닫기</button>
+    </header>
+    <div class="body" id="mBody"></div>
+  </div>
+</div>
+
+<script>
+const CLS = {"즉시":"now","주의":"warn","로그":"ok"};
+const SCOPE = parseInt("__SCOPE__",10) || 1;   // 이 대시보드가 담당하는 차시
+document.getElementById("scopeTtl").textContent = SCOPE+"차시";
+async function ack(sid, session){
+  await fetch("/api/ack",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({student_id:sid, session})});
+  load();
+}
+async function load(){
+  let d;
+  try{ const r=await fetch("/api/dashboard?session="+SCOPE);
+       if(r.status===403){ location.href="/teacher/"+SCOPE; return; }
+       d=await r.json(); }catch(e){ return; }
+  const rows=d.students||[];
+  const cnt={즉시:0,주의:0,로그:0};
+  rows.forEach(r=>cnt[r.level]++);
+  document.getElementById("c-now").textContent=cnt["즉시"];
+  document.getElementById("c-warn").textContent=cnt["주의"];
+  document.getElementById("c-ok").textContent=cnt["로그"];
+
+  const tb=document.getElementById("rows");
+  if(rows.length===0){ tb.innerHTML='<tr><td class="empty" colspan="9">아직 접속한 학생이 없습니다.</td></tr>'; return; }
+  tb.innerHTML="";
+  rows.forEach(r=>{
+    const tr=document.createElement("tr"); tr.className=CLS[r.level]+" clickable";
+    tr.addEventListener("click",e=>{ if(e.target.tagName!=="BUTTON") openTranscript(r.student_id, r.session); });
+    const stateLabel = r.level==="로그" ? "정상" : r.level;
+    const elem = "●".repeat(r["요소누적도"]) + "○".repeat(4-r["요소누적도"]);
+    const ackBtn = r.level==="즉시"
+      ? `<button class="ack" onclick="event.stopPropagation();ack('${r.student_id}',${r.session})">확인</button>`
+      : `<span class="view">대화 보기</span>`;
+    tr.innerHTML =
+      `<td class="state">${stateLabel}</td>`+
+      `<td>${r.student_id}</td>`+
+      `<td>${r.session}차시</td>`+
+      `<td>${r.topic}</td>`+
+      `<td>${r.turns}</td>`+
+      `<td title="상황·조건·목적·대상">${elem}</td>`+
+      `<td><span class="badge">${r["대화유형"]}</span></td>`+
+      `<td class="last" title="${r.last}">${r.reason==="정상"?r.last:r.reason}</td>`+
+      `<td>${ackBtn}</td>`;
+    tb.appendChild(tr);
+  });
+}
+async function openTranscript(sid, session){
+  const modal=document.getElementById("modal"), body=document.getElementById("mBody");
+  document.getElementById("mTitle").textContent = `${sid} · ${session}차시 대화 전문`;
+  body.innerHTML="<div style='color:#888'>불러오는 중…</div>"; modal.classList.add("on");
+  let d;
+  try{ d=await (await fetch(`/api/transcript?student=${encodeURIComponent(sid)}&session=${session}`)).json(); }
+  catch(e){ body.innerHTML="<div style='color:#b4453a'>불러오기 실패</div>"; return; }
+  if(!d.turns || d.turns.length===0){ body.innerHTML="<div style='color:#888'>아직 대화 기록이 없습니다.</div>"; return; }
+  body.innerHTML="";
+  d.turns.forEach(t=>{
+    const wrap=document.createElement("div"); wrap.className="turn";
+    const els=Object.keys(t.elements||{}).filter(k=>t.elements[k]).join("·")||"없음";
+    let html=`<div class="u">${escapeHtml(t.student)}</div>`;
+    if(t.safety_ok===false){
+      html+=`<div class="a blocked">⚠ 안전 개입: ${t.category||""} (AI 응답 차단)</div>`;
+    }else if(t.ai){
+      html+=`<div class="a">${escapeHtml(t.ai)}</div>`;
+    }
+    html+=`<div class="tags">턴 ${t.turn} · 요소[${els}] · 계기:${t["계기"]} · 개입:${t["개입"]}</div>`;
+    wrap.innerHTML=html; body.appendChild(wrap);
+  });
+}
+function closeModal(){ document.getElementById("modal").classList.remove("on"); }
+function escapeHtml(s){ return (s||"").replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+document.getElementById("modal").addEventListener("click",e=>{ if(e.target.id==="modal") closeModal(); });
+
+document.getElementById("resetBtn").addEventListener("click", async ()=>{
+  if(!confirm(SCOPE+"차시 학생들의 대화 기록을 화면에서 지웁니다. 계속할까요?")) return;
+  await fetch("/api/reset",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({session:SCOPE})}); load();
+});
+load(); setInterval(load, 3000);
+</script>
+</body>
+</html>

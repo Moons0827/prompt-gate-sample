@@ -1,0 +1,23 @@
+# Render(무료 호스팅) 배포 설정. GitHub에 올린 뒤 Render에서 이 저장소를 연결하면
+# 아래 설정으로 자동 배포됩니다. 배포 후 받는 https 주소가 '온라인 주소'입니다.
+services:
+  - type: web
+    name: prompt-gate
+    runtime: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python app.py"
+    envVars:
+      - key: ANTHROPIC_API_KEY
+        sync: false          # Render 대시보드에서 직접 입력(비밀값)
+      - key: ANTHROPIC_MODEL
+        value: claude-haiku-4-5-20251001
+      - key: COOLDOWN_SEC
+        value: "5"
+      - key: LESSON_SESSION
+        value: "1"          # /s 기본 차시. 학생은 /s/1~/s/4 링크로 접속.
+      - key: ADMIN_KEY
+        sync: false          # 관리자 코드 — Render 대시보드에서 직접 입력
+      - key: TEACHER_KEY
+        sync: false          # 교사 코드 — Render 대시보드에서 직접 입력
+      # PORT는 Render가 자동으로 넣어줍니다(코드가 $PORT를 읽습니다).
