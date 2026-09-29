@@ -91,6 +91,10 @@
     <div class="body" id="mBody"></div>
     <div class="replybar" style="border-top:1px solid var(--line);padding:12px 16px;display:flex;flex-direction:column;gap:8px;">
       <div id="pendingNote" style="display:none;font-size:12.5px;color:var(--now);background:var(--now-bg);border:1px solid #e3b6af;border-radius:8px;padding:8px 10px;"></div>
+      <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+        <span style="font-size:12px;color:var(--sub);">빠른 유도</span>
+        <span id="quickNudge" style="display:flex;flex-wrap:wrap;gap:6px;"></span>
+      </div>
       <textarea id="replyText" placeholder="학생에게 보낼 답을 입력하세요…" style="width:100%;height:52px;resize:none;padding:9px 11px;border:1px solid var(--line);border-radius:8px;font-family:inherit;font-size:14px;"></textarea>
       <div style="display:flex;gap:8px;justify-content:space-between;align-items:center;">
         <span id="ackOnly" style="font-size:12px;color:var(--sub);text-decoration:underline;cursor:pointer;">답 없이 확인만</span>
@@ -203,6 +207,33 @@ document.getElementById("ackOnly").addEventListener("click", async ()=>{
   closeModal(); load();
 });
 function escapeHtml(s){ return (s||"").replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+// ── 빠른 유도 문구(원클릭 전송) ─────────────────────────────────────────
+// 반복 정체(노란 주의) 아이에게 교사가 개별 유도를 한마디 넣어줄 때 쓴다.
+// 문구는 여기만 고치면 버튼이 자동으로 바뀐다. (요소 이름을 직접 짚는 건 사람 개입이라 허용)
+const QUICK_NUDGES = [
+  "한 줄만 더 붙여볼래?",
+  "지금 답이 좀 뻔하지? 뭘 더 넣으면 좋아질까?",
+  "누구를 위한 건지도 적어볼래?",
+  "어떤 상황인지 살짝 알려줄래?",
+  "보내기 전에 스스로 한 번 점검해볼까?",
+];
+(function buildQuickNudges(){
+  const box=document.getElementById("quickNudge");
+  QUICK_NUDGES.forEach(txt=>{
+    const b=document.createElement("button");
+    b.type="button"; b.textContent=txt;
+    b.style.cssText="font-size:12px;padding:4px 9px;border:1px solid var(--line);"
+      +"border-radius:14px;background:#fff;cursor:pointer;color:var(--ink);";
+    b.addEventListener("click", async ()=>{
+      if(!CUR || b.disabled) return;
+      b.disabled=true; const old=b.textContent; b.textContent="보냄…";
+      await doPost("/api/teacher_reply",{student_id:CUR.sid, session:CUR.session, text:txt});
+      closeModal(); load();      // 학생 화면엔 3초 폴링으로 자연스럽게 전달됨
+    });
+    box.appendChild(b);
+  });
+})();
 document.getElementById("modal").addEventListener("click",e=>{ if(e.target.id==="modal") closeModal(); });
 
 document.getElementById("resetBtn").addEventListener("click", async ()=>{
