@@ -1,1 +1,2 @@
-anthropic>=0.40   # 실 LLM 사용 시에만 필요 (mock 모드는 표준 라이브러리만으로 동작)
+anthropic>=0.40         # 실 LLM 사용 시에만 필요 (mock 모드는 표준 라이브러리만으로 동작)
+psycopg2-binary>=2.9    # DATABASE_URL(Neon 등) 있을 때 상태 영속화용. 없으면 메모리 폴백.

@@ -15,8 +15,9 @@ import os, json, csv, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-from detector import ConversationCoder, NudgePolicy, LOG_FIELDS, SafetyFilter
+from detector import ConversationCoder, NudgePolicy, LOG_FIELDS, SafetyFilter, TurnLog, ELEMENTS
 import llm
+import store
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
@@ -60,21 +61,80 @@ def _load_dotenv():
 
 _load_dotenv()
 
-# (student_id, session) -> {coder, messages}
+# (student_id, session) -> {coder, messages, ...}  (실행 중 캐시; 영속본은 store)
 SESSIONS = {}
 
 
+def _new_session(sid, session, topic):
+    return {
+        "coder": ConversationCoder(sid, int(session), topic or "자유",
+                                   policy=NudgePolicy(session=int(session)),
+                                   safety_llm=SAFETY_LLM),
+        "messages": [], "updated": time.time(), "ack": True, "last": "",
+        "last_elicited": False, "transcript": [], "last_turn_ts": 0,
+    }
+
+
+def _serialize(S) -> dict:
+    """세션 상태를 저장 가능한 dict로. 대화 복원에 필요한 코더 내부까지 포함."""
+    from dataclasses import asdict
+    c = S["coder"]
+    return {
+        "coder": {"history": c._history, "cum": c._cum, "turn": c._turn,
+                  "logs": [asdict(l) for l in c.logs]},
+        "messages": S["messages"], "ack": S["ack"], "last": S["last"],
+        "last_elicited": S["last_elicited"], "updated": S["updated"],
+        "last_turn_ts": S.get("last_turn_ts", 0), "transcript": S["transcript"],
+    }
+
+
+def _deserialize(state: dict, sid, session, topic) -> dict:
+    """store에서 읽은 dict를 실행용 세션(코더 포함)으로 복원."""
+    S = _new_session(sid, session, topic)
+    c = S["coder"]
+    cd = state.get("coder", {})
+    c._history = list(cd.get("history", []))
+    cum = cd.get("cum", {})
+    c._cum = {e: bool(cum.get(e, False)) for e in ELEMENTS}
+    c._turn = int(cd.get("turn", 0))
+    c.logs = [TurnLog(**d) for d in cd.get("logs", [])]
+    S["messages"] = list(state.get("messages", []))
+    S["ack"] = bool(state.get("ack", True))
+    S["last"] = state.get("last", "")
+    S["last_elicited"] = bool(state.get("last_elicited", False))
+    S["updated"] = float(state.get("updated", time.time()))
+    S["last_turn_ts"] = float(state.get("last_turn_ts", 0))
+    S["transcript"] = list(state.get("transcript", []))
+    return S
+
+
 def _get_session(sid, session, topic):
+    """캐시에 있으면 그대로, 없으면 store에서 복원(=재시작 후 이어가기), 그래도 없으면 신규."""
     key = (sid, int(session))
     if key not in SESSIONS:
-        SESSIONS[key] = {
-            "coder": ConversationCoder(sid, int(session), topic or "자유",
-                                       policy=NudgePolicy(session=int(session)),
-                                       safety_llm=SAFETY_LLM),
-            "messages": [], "updated": time.time(), "ack": True, "last": "",
-            "last_elicited": False, "transcript": [],
-        }
+        saved = store.get_state(sid, int(session))
+        SESSIONS[key] = _deserialize(saved, sid, session, topic) if saved \
+            else _new_session(sid, session, topic)
     return SESSIONS[key]
+
+
+def _dash_row(sid, session, S) -> dict:
+    """대시보드 한 줄을 미리 계산(저장 시 함께 넣어 재시작 후에도 바로 조회)."""
+    coder = S["coder"]; s = coder.summary()
+    level, reason = compute_status(S)
+    return {
+        "student_id": sid, "session": int(session), "topic": coder.meta[2],
+        "turns": s["총턴수"], "요소누적도": s["요소누적도"],
+        "대화유형": s["대화유형"], "자발비율": s["자발비율"],
+        "last": (S.get("last") or "")[:30], "level": level, "reason": reason,
+        "updated": S["updated"],
+    }
+
+
+def _save_session(sid, session, S):
+    """세션 상태 + 대시보드 요약을 store에 영속화(매 턴 호출)."""
+    store.put_state(sid, int(session), S["coder"].meta[2],
+                    _serialize(S), _dash_row(sid, session, S))
 
 
 def _append_transcript(entry: dict):
@@ -105,21 +165,13 @@ def compute_status(S: dict) -> tuple:
 
 
 def dashboard_data(only_session=None) -> list:
-    rows = []
-    for (sid, session), S in SESSIONS.items():
-        if only_session is not None and session != int(only_session):
-            continue
-        coder = S["coder"]; s = coder.summary()
-        level, reason = compute_status(S)
-        rows.append({
-            "student_id": sid, "session": session, "topic": coder.meta[2],
-            "turns": s["총턴수"], "요소누적도": s["요소누적도"],
-            "대화유형": s["대화유형"], "자발비율": s["자발비율"],
-            "last": (S.get("last") or "")[:30], "level": level, "reason": reason,
-            "ago": int(time.time() - S["updated"]),
-        })
+    """store(영속본)에서 요약 행을 읽어 구성 → 재시작·다른 세션에도 그대로 보임."""
+    rows = store.list_summaries(only_session)
+    now = time.time()
+    for r in rows:
+        r["ago"] = int(now - r.get("updated", now))
     order = {"즉시": 0, "주의": 1, "로그": 2}
-    rows.sort(key=lambda r: (order[r["level"]], r["ago"]))
+    rows.sort(key=lambda r: (order.get(r.get("level", "로그"), 2), r["ago"]))
     return rows
 
 
@@ -190,6 +242,7 @@ def handle_turn(body: dict) -> dict:
     S["transcript"].append(entry)
     _append_transcript({"time": time.strftime("%Y-%m-%d %H:%M:%S"),
                         "student_id": sid, "session": int(session), **entry})
+    _save_session(sid, session, S)   # ★ 매 턴 즉시 영속화 (튕겨도 이어가기)
 
     return {
         "reply": reply,
@@ -331,9 +384,10 @@ class Handler(BaseHTTPRequestHandler):
             if role not in ("admin", "teacher"):
                 return self._send(403, {"error": "권한이 필요합니다."})
             if path == "/api/ack":                         # 교사: 알림 확인 처리
-                key = (body.get("student_id"), int(body.get("session", 1)))
-                if key in SESSIONS:
-                    SESSIONS[key]["ack"] = True
+                sid = body.get("student_id"); sess = int(body.get("session", 1))
+                S = _get_session(sid, sess, "자유")
+                S["ack"] = True
+                _save_session(sid, sess, S)                 # 확인 상태도 영속화(레벨 재계산)
                 return self._send(200, {"ok": True})
             if path == "/api/reset":                        # 교사: 실습 초기화(해당 차시만)
                 sess = body.get("session")
@@ -342,6 +396,7 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     for k in [k for k in SESSIONS if k[1] == int(sess)]:
                         del SESSIONS[k]
+                store.clear(None if sess is None else int(sess))  # 영속본도 초기화
                 return self._send(200, {"ok": True})
             self._send(404, {"error": "not found"})
         except Exception as e:
@@ -361,6 +416,8 @@ def _lan_ip():
         return "127.0.0.1"
 
 
+store.init()   # 저장소 준비(테이블 생성 등). DATABASE_URL 없으면 메모리 폴백.
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     mode = "실 LLM(" + os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001") + ")" \
@@ -373,5 +430,6 @@ if __name__ == "__main__":
     print(f"  교사 대시보드:      http://localhost:{port}/teacher/1  (코드: TEACHER_KEY)")
     print(f"  같은 와이파이 IP:   http://{ip}:{port}      (학생 기기에서 /s/1 로 접속)")
     print(f"  턴 로그:            {LOGCSV}")
+    print(f"  상태 저장소:        {store.backend()}  (postgres면 재시작 후 이어가기 O)")
     print("=" * 60)
     ThreadingHTTPServer(("0.0.0.0", port), Handler).serve_forever()
