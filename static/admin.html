@@ -47,6 +47,12 @@
     <tbody id="rows"></tbody>
   </table>
 
+  <div style="margin-top:14px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+    <button id="pauseBtn" style="font-size:13px;padding:7px 14px;border:1px solid var(--line);
+      border-radius:8px;cursor:pointer;background:#fff;color:var(--sub);">⏸ 전체 잠깐 멈추기</button>
+    <span style="font-size:12px;color:var(--sub);">모든 학생의 새 대화 처리를 잠깐 멈춰요(수업 통제·비용 급증 대비). 학생 화면엔 '쉬는 시간' 안내가 뜹니다.</span>
+  </div>
+
   <div style="margin-top:18px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;">
     <div style="font-weight:700;margin-bottom:8px;">로그 다운로드</div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
@@ -60,8 +66,10 @@
       <a class="btn" id="dlSummary">학생별 요약 CSV</a>
       <a class="btn" id="dlJson">원본 JSON</a>
       <a class="btn" id="dlTemplate">사람 코딩용 빈 서식</a>
+      <label style="font-size:13px;color:var(--sub);margin-left:6px;">
+        <input type="checkbox" id="realName"> 실명 포함</label>
     </div>
-    <div style="font-size:12px;color:var(--sub);margin-top:8px;">학생 대화가 매 턴 자동 저장됩니다. 언제든 내려받아 분석·백업하세요. (본명 포함 — 분석 단계에선 익명화 권장)</div>
+    <div style="font-size:12px;color:var(--sub);margin-top:8px;">기본은 <b>익명(S01·S02…)</b>으로 내려받아요. 파일 종류가 달라도 같은 학생은 같은 번호라 서로 연결됩니다. '실명 포함'을 체크하면 본명으로 받습니다(취급 주의).</div>
     <div style="font-size:12px;color:var(--sub);margin-top:4px;">코더 신뢰도 검증: '빈 서식'을 사람이 채운 뒤 '턴별 코딩 CSV'와 함께 <code>python validate.py 턴별코딩.csv 사람코딩.csv</code> 로 F1·κ 확인.</div>
   </div>
 
@@ -106,12 +114,31 @@ tb.addEventListener("click",e=>{
 // 로그 다운로드 링크(관리자 쿠키가 자동 전송되어 그대로 내려받아짐)
 function updExports(){
   const s=document.getElementById("expScope").value;
-  document.getElementById("dlTurns").href="/api/export?fmt=turns&session="+s;
-  document.getElementById("dlSummary").href="/api/export?fmt=summary&session="+s;
-  document.getElementById("dlJson").href="/api/export?fmt=json&session="+s;
-  document.getElementById("dlTemplate").href="/api/export?fmt=template&session="+s;
+  const anon=document.getElementById("realName").checked ? "&anon=0" : "";
+  document.getElementById("dlTurns").href="/api/export?fmt=turns&session="+s+anon;
+  document.getElementById("dlSummary").href="/api/export?fmt=summary&session="+s+anon;
+  document.getElementById("dlJson").href="/api/export?fmt=json&session="+s+anon;
+  document.getElementById("dlTemplate").href="/api/export?fmt=template&session="+s+anon;
 }
-document.getElementById("expScope").addEventListener("change",updExports); updExports();
+document.getElementById("expScope").addEventListener("change",updExports);
+document.getElementById("realName").addEventListener("change",updExports); updExports();
+
+// 비상 정지 토글 — 전체 학생의 새 대화 처리를 잠깐 멈춤(수업 통제·비용 급증 시)
+async function refreshPause(){
+  try{ const h=await (await fetch("/api/health")).json();
+    const btn=document.getElementById("pauseBtn"); if(!btn) return;
+    btn.textContent = h.paused ? "▶ 재개하기 (지금 정지됨)" : "⏸ 전체 잠깐 멈추기";
+    btn.style.background = h.paused ? "var(--now,#b4453a)" : "#fff";
+    btn.style.color = h.paused ? "#fff" : "var(--sub)";
+  }catch(e){}
+}
+document.getElementById("pauseBtn").addEventListener("click", async ()=>{
+  const h=await (await fetch("/api/health")).json();
+  await fetch("/api/pause",{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({on: !h.paused})});
+  refreshPause();
+});
+refreshPause();
 </script>
 </body>
 </html>

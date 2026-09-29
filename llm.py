@@ -7,9 +7,18 @@ LLM 대화 응답 모듈.
     맞지 않으면 자동으로 mock으로 떨어지므로, 실습 전 본인 키로 한 번 확인 권장.
 """
 from __future__ import annotations
-import os, random
+import os, random, time
 
 DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+
+# 실 LLM 호출이 '예외로' mock 대체된 마지막 시각(키가 아예 없는 정상 mock 모드는 제외).
+# 관리자/교사 화면에서 '조용한 품질 저하'를 감지하는 데 쓴다.
+_DEGRADED_AT = 0.0
+
+
+def degraded_recently(window: int = 120) -> bool:
+    """최근 window초 안에 실 LLM 호출이 실패해 mock으로 떨어진 적이 있으면 True."""
+    return _DEGRADED_AT > 0 and (time.time() - _DEGRADED_AT) < window
 
 CHAT_BASE = """너는 초등학교 5·6학년 학생과 대화하는 친절한 AI 조력자다.
 규칙:
@@ -38,6 +47,8 @@ def chat(messages: list[dict], filled: int = 0, session: int = 1,
         try:
             return _anthropic_chat(messages, session, model or DEFAULT_MODEL)
         except Exception as e:
+            global _DEGRADED_AT
+            _DEGRADED_AT = time.time()      # 실 호출 실패 → 품질저하 신호 기록
             print("[chat] LLM 호출 실패 → mock 대체:", e)
     return _mock_chat(messages, filled, session)
 

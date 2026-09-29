@@ -53,6 +53,8 @@
   .a.blocked{background:var(--now-bg);color:var(--now);}
   .tags{font-size:11px;color:var(--sub);align-self:flex-start;}
   .closeBtn{font-size:14px;padding:6px 12px;border:1px solid var(--line);background:#fff;border-radius:8px;cursor:pointer;}
+  @keyframes flashrow{0%,100%{background:var(--now-bg);}50%{background:#f6c6bd;}}
+  tr.flash{animation:flashrow 0.9s ease-in-out 3;}
 </style>
 </head>
 <body>
@@ -65,6 +67,8 @@
     <button id="resetBtn" style="font-size:12px;padding:6px 12px;border:1px solid var(--line);
       background:#fff;border-radius:8px;cursor:pointer;color:var(--sub);">실습 초기화</button>
   </div>
+  <div id="healthBanner" style="display:none;font-size:13px;margin:10px 0;padding:9px 12px;
+    border-radius:8px;border:1px solid #e3b6af;background:var(--now-bg);color:var(--now);"></div>
 
   <div class="counts">
     <div class="count now"><div class="n" id="c-now">0</div><div class="l">즉시 — 안전 개입</div></div>
@@ -111,6 +115,35 @@
 const CLS = {"즉시":"now","주의":"warn","로그":"ok"};
 const SCOPE = parseInt("__SCOPE__",10) || 1;   // 이 대시보드가 담당하는 차시
 document.getElementById("scopeTtl").textContent = SCOPE+"차시";
+const BASE_TITLE = document.title;
+
+// 새 '즉시'(안전) 신호 감지 → 소리·행 강조·탭 제목 뱃지로 교사가 놓치지 않게
+let prevNow = new Set(), firstLoad = true, audioCtx = null;
+function beep(){
+  try{
+    audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
+    if(audioCtx.state==="suspended") audioCtx.resume();
+    const o=audioCtx.createOscillator(), g=audioCtx.createGain();
+    o.type="sine"; o.frequency.value=880; o.connect(g); g.connect(audioCtx.destination);
+    const t=audioCtx.currentTime;
+    g.gain.setValueAtTime(0.0001,t); g.gain.exponentialRampToValueAtTime(0.25,t+0.02);
+    g.gain.exponentialRampToValueAtTime(0.0001,t+0.45);
+    o.start(t); o.stop(t+0.47);
+  }catch(e){}
+}
+// 브라우저 오디오 잠금 해제(첫 클릭 때 한 번)
+document.addEventListener("click", ()=>{ try{ if(!audioCtx) audioCtx=new (window.AudioContext||window.webkitAudioContext)(); audioCtx.resume&&audioCtx.resume(); }catch(e){} }, {once:true});
+
+async function checkHealth(){
+  try{
+    const h=await (await fetch("/api/health")).json();
+    const b=document.getElementById("healthBanner");
+    if(h.paused){ b.style.display="block"; b.textContent="⏸ 지금 전체 정지 상태예요. 학생 화면은 '쉬는 시간' 안내가 뜹니다. (관리자 화면에서 해제)"; }
+    else if(h.degraded){ b.style.display="block"; b.textContent="⚠ AI 응답에 일시적 문제가 있어요(연결·한도 등). 잠시 응답이 늦거나 단순해질 수 있어요."; }
+    else if(h.mode==="mock"){ b.style.display="block"; b.textContent="ℹ 지금 데모(mock) 모드예요 — 실제 AI 키가 설정되지 않았습니다."; }
+    else { b.style.display="none"; }
+  }catch(e){}
+}
 async function ack(sid, session){
   await fetch("/api/ack",{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify({student_id:sid, session})});
@@ -128,11 +161,20 @@ async function load(){
   document.getElementById("c-warn").textContent=cnt["주의"];
   document.getElementById("c-ok").textContent=cnt["로그"];
 
+  // 새로 뜬 '즉시' 신호 감지(첫 로드는 알림 생략) → 소리 + 탭 제목 뱃지
+  const curNow=new Set(rows.filter(r=>r.level==="즉시").map(r=>r.student_id+"|"+r.session));
+  const newNow=[...curNow].filter(k=>!prevNow.has(k));
+  if(!firstLoad && newNow.length){ beep(); }
+  firstLoad=false; prevNow=curNow;
+  document.title=(cnt["즉시"]>0?`🔴(${cnt["즉시"]}) `:"")+BASE_TITLE;
+  checkHealth();
+
   const tb=document.getElementById("rows");
   if(rows.length===0){ tb.innerHTML='<tr><td class="empty" colspan="9">아직 접속한 학생이 없습니다.</td></tr>'; return; }
   tb.innerHTML="";
   rows.forEach(r=>{
-    const tr=document.createElement("tr"); tr.className=CLS[r.level]+" clickable";
+    const isNew = newNow.includes(r.student_id+"|"+r.session);
+    const tr=document.createElement("tr"); tr.className=CLS[r.level]+" clickable"+(isNew?" flash":"");
     tr.addEventListener("click",e=>{ if(e.target.tagName!=="BUTTON") openTranscript(r.student_id, r.session); });
     const stateLabel = r.level==="로그" ? "정상" : r.level;
     const elem = "●".repeat(r["요소누적도"]) + "○".repeat(4-r["요소누적도"]);

@@ -74,6 +74,13 @@ MAX_MESSAGES = int(os.environ.get("MAX_MESSAGES", 30))   # LLM에 보내는 최�
 PRESENCE = {}
 JOIN_WINDOW = int(os.environ.get("JOIN_WINDOW", 20))     # 이 시간(초) 안에 활동이 있으면 '접속 중'으로 봄
 
+# 비용/폭주 방지: 한 학생이 한 차시에서 보낼 수 있는 최대 턴 수(초과 시 부드럽게 멈춤).
+MAX_STUDENT_TURNS = int(os.environ.get("MAX_STUDENT_TURNS", 60))
+# 관리자 비상 정지 — True면 모든 학생의 새 턴 처리를 멈춘다(/api/pause로 토글).
+PAUSED = False
+# 자해·정서위험 범주 — 이 경우엔 학생에게 조용한 대기 대신 따뜻한 '케어' 안내를 보낸다.
+CARE_CATEGORY = "자해·정서위험"
+
 
 def _cache_put(key, S):
     """세션을 캐시에 넣고 최신으로 표시. 상한을 넘으면 가장 오래된 것부터 내보낸다(영속본은 유지)."""
@@ -284,6 +291,15 @@ def handle_turn(body: dict) -> dict:
     S = _get_session(sid, session, topic)
     _touch_presence(sid, session)   # 이 이름이 아직 접속 중임을 갱신
 
+    # 관리자 비상 정지 — 새 턴을 처리하지 않고 안내만
+    if PAUSED:
+        return {"reply": "지금은 잠깐 쉬는 시간이야. 선생님 안내를 기다려줘!",
+                "elements": S["coder"].elements(), "paused": True}
+    # 학생당 턴 상한 — 비용 폭주·도배 방지(초과 시 LLM 호출 없이 부드럽게 멈춤)
+    if S["coder"]._turn >= MAX_STUDENT_TURNS:
+        return {"reply": "오늘 정말 많이 이야기했다! 잠깐 쉬었다가 선생님이 안내해줄 거야.",
+                "elements": S["coder"].elements(), "capped": True}
+
     # 연속 전송 방지: 마지막 전송 후 COOLDOWN_SEC 이내면 처리하지 않음(서버측 강제)
     now = time.time()
     since = now - S.get("last_turn_ts", 0)
@@ -330,7 +346,8 @@ def handle_turn(body: dict) -> dict:
     entry = {"turn": L.턴, "student": utterance, "ai": reply,
              "계기": L.계기, "개입": L.개입, "행위유형": L.행위유형,
              "safety_ok": res["safety"].ok, "category": res["safety"].category,
-             "elements": coder.elements(), "turn_elements": turn_el, "pending": blocked}
+             "elements": coder.elements(), "turn_elements": turn_el, "pending": blocked,
+             "ts": time.strftime("%Y-%m-%d %H:%M:%S")}   # 턴별 시각(프로세스 분석용)
     S["transcript"].append(entry)
     _append_transcript({"time": time.strftime("%Y-%m-%d %H:%M:%S"),
                         "student_id": sid, "session": int(session), **entry})
@@ -340,7 +357,10 @@ def handle_turn(body: dict) -> dict:
     if blocked:
         # 학생에겐 위험/차단 사실을 절대 노출하지 않는다 — '생각 중' 상태만 돌려주고,
         # 교사가 답을 넣거나 'AI 허용'을 누르면 학생 폴링(/api/pending)으로 자연스럽게 전달된다.
-        return {"status": "waiting", "elements": coder.elements()}
+        # 단 자해·정서위험만은 조용한 대기 대신 '케어' 안내를 보이도록 신호(care)를 준다.
+        # (구체 범주명은 노출하지 않는다 — 아이는 자기가 무엇으로 걸렸는지 알 수 없음)
+        return {"status": "waiting", "elements": coder.elements(),
+                "care": (res["safety"].category == CARE_CATEGORY)}
     return {"reply": reply, "elements": coder.elements(), "summary": coder.summary()}
 
 
@@ -407,29 +427,38 @@ def handle_pending(sid, session):
 
 
 # ---- 로그 내보내기 (관리자) ---------------------------------------------------
-def _export_bytes(fmt, only_session):
+def _export_bytes(fmt, only_session, anon=True):
+    """anon=True(기본): 학생 실명을 S01·S02…로 익명화(논문·공유 안전).
+       anon=False: 관리자가 명시적으로 '실명 포함'을 선택했을 때만 실명 그대로."""
     import io, csv as _csv
     rows = store.list_all(only_session)   # [{student_id, session, topic, state}]
+    sums = store.list_summaries(only_session)
     stamp = time.strftime("%Y%m%d")
     scope = "전체" if only_session is None else f"{only_session}차시"
+    tag = "실명" if not anon else "익명"
+    # 익명화 매핑: 스코프 내 모든 실명 → S01… (내보내기 종류가 달라도 같은 번호 → 파일 간 연결 가능)
+    ids = sorted({r["student_id"] for r in rows} | {s.get("student_id") for s in sums})
+    alias = {sid: f"S{i:02d}" for i, sid in enumerate(ids, 1)}
+    nm = (lambda sid: sid) if not anon else (lambda sid: alias.get(sid, sid))
+
     if fmt == "json":
         data = []
         for r in rows:
             st = r.get("state") or {}
-            data.append({"student_id": r["student_id"], "session": r["session"],
+            data.append({"student_id": nm(r["student_id"]), "session": r["session"],
                          "topic": r.get("topic"), "transcript": st.get("transcript", [])})
         body = json.dumps({"exported": time.strftime("%Y-%m-%d %H:%M:%S"),
-                           "scope": scope, "count": len(data), "sessions": data},
+                           "scope": scope, "anonymized": anon, "count": len(data), "sessions": data},
                           ensure_ascii=False, indent=2).encode("utf-8")
-        return body, "application/json; charset=utf-8", f"로그원본_{scope}_{stamp}.json"
+        return body, "application/json; charset=utf-8", f"로그원본_{scope}_{tag}_{stamp}.json"
     if fmt == "summary":
         buf = io.StringIO(); buf.write("﻿"); w = _csv.writer(buf)
         w.writerow(["학생","차시","주제","턴수","요소누적도","대화유형","자발비율","마지막발화","수준","사유"])
-        for s in store.list_summaries(only_session):
-            w.writerow([s.get("student_id"), s.get("session"), s.get("topic"), s.get("turns"),
+        for s in sums:
+            w.writerow([nm(s.get("student_id")), s.get("session"), s.get("topic"), s.get("turns"),
                         s.get("요소누적도"), s.get("대화유형"), s.get("자발비율"),
                         s.get("last"), s.get("level"), s.get("reason")])
-        return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", f"학생별요약_{scope}_{stamp}.csv"
+        return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", f"학생별요약_{scope}_{tag}_{stamp}.csv"
     if fmt == "template":
         # 사람 코딩용 빈 서식 — 학생/AI 발화만 채워주고 코드 칸은 비워 둔다.
         # 코더 신뢰도 검증(F1·κ) 때 이 서식을 사람이 채운 뒤 validate.py로 기계 코딩과 대조한다.
@@ -439,26 +468,26 @@ def _export_bytes(fmt, only_session):
         for r in rows:
             st = r.get("state") or {}
             for t in st.get("transcript", []):
-                w.writerow([r["student_id"], r["session"], t.get("turn"),
+                w.writerow([nm(r["student_id"]), r["session"], t.get("turn"),
                             t.get("student") or "", t.get("ai") or "",
                             "","","","","","",""])   # 사람이 채울 칸(빈칸)
-        return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", f"사람코딩서식_{scope}_{stamp}.csv"
+        return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", f"사람코딩서식_{scope}_{tag}_{stamp}.csv"
     # 기본: 턴별 코딩(기계) — 사람코딩서식과 열 이름이 같아 validate.py로 바로 대조 가능
     buf = io.StringIO(); buf.write("﻿"); w = _csv.writer(buf)
-    w.writerow(["학생","차시","턴","학생발화","AI응답",
+    w.writerow(["학생","차시","턴","시각","학생발화","AI응답",
                 "상황","조건","목적","대상","계기","개입","행위유형","안전OK","위험범주"])
     for r in rows:
         st = r.get("state") or {}
         for t in st.get("transcript", []):
             # 이번 턴 탐지 요소 우선, 구(舊)데이터는 누적 요소로 폴백
             e = t.get("turn_elements") or t.get("elements", {}) or {}
-            w.writerow([r["student_id"], r["session"], t.get("turn"),
+            w.writerow([nm(r["student_id"]), r["session"], t.get("turn"), t.get("ts") or "",
                         t.get("student") or "", t.get("ai") or "",
                         int(bool(e.get("상황"))), int(bool(e.get("조건"))),
                         int(bool(e.get("목적"))), int(bool(e.get("대상"))),
                         t.get("계기"), t.get("개입"), t.get("행위유형") or "",
                         t.get("safety_ok"), t.get("category") or ""])
-    return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", f"턴별코딩_{scope}_{stamp}.csv"
+    return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", f"턴별코딩_{scope}_{tag}_{stamp}.csv"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -541,6 +570,13 @@ class Handler(BaseHTTPRequestHandler):
             if not sid:
                 return self._send(200, {"reply": None})
             return self._send(200, handle_pending(sid, session))
+        if path == "/api/health":                 # 교사/관리자 — 서비스 상태(품질저하·정지)
+            if role not in ("admin", "teacher"):
+                return self._send(403, {"error": "권한이 필요합니다."})
+            has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+            return self._send(200, {"mode": "live" if has_key else "mock",
+                                    "degraded": bool(llm.degraded_recently()),
+                                    "paused": PAUSED})
         if path == "/api/export":                # 관리자 전용 로그 내보내기
             if role != "admin":
                 return self._send(403, {"error": "관리자만 내보낼 수 있습니다."})
@@ -548,7 +584,8 @@ class Handler(BaseHTTPRequestHandler):
             fmt = (q.get("fmt") or ["turns"])[0]
             sraw = (q.get("session") or ["all"])[0]
             only = None if sraw in ("all", "", None) else int(sraw)
-            body, ctype, fname = _export_bytes(fmt, only)
+            anon = (q.get("anon") or ["1"])[0] != "0"   # 기본 익명화, anon=0이면 실명 포함
+            body, ctype, fname = _export_bytes(fmt, only, anon=anon)
             from urllib.parse import quote
             self.send_response(200)
             self.send_header("Content-Type", ctype)
@@ -628,6 +665,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/allow_ai":                    # 교사: 사소한 위험 통과 → AI가 답하게
                 sid = body.get("student_id"); sess = int(body.get("session", 1))
                 return self._send(200, handle_allow_ai(sid, sess))
+            if path == "/api/pause":                       # 관리자/교사: 전역 비상 정지 토글
+                global PAUSED
+                PAUSED = bool(body.get("on"))
+                return self._send(200, {"ok": True, "paused": PAUSED})
             if path == "/api/reset":                        # 교사: 실습 초기화(해당 차시만)
                 sess = body.get("session")
                 if sess is None:
