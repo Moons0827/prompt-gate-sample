@@ -15,7 +15,7 @@ import os, json, csv, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
-from detector import ConversationCoder, NudgePolicy, LOG_FIELDS
+from detector import ConversationCoder, NudgePolicy, LOG_FIELDS, SafetyFilter
 import llm
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -30,6 +30,11 @@ COOLDOWN_SEC = int(os.environ.get("COOLDOWN_SEC", 5))
 
 # /s (차시 번호 없이 접속) 시 기본 차시.
 LESSON_SESSION = int(os.environ.get("LESSON_SESSION", 1))
+
+# 안전 계층: Layer1 키워드(입력)·Layer2 키워드(AI 출력)는 항상 켜짐.
+# Layer3 = LLM 2차 입력 점검(우회·간접 표현 보완). 턴당 LLM 호출이 1회 늘어 비용↑ →
+# 기본 꺼짐. 실제 학생 투입 시 SAFETY_LLM=1 권장.
+SAFETY_LLM = os.environ.get("SAFETY_LLM", "0") == "1"
 
 # 접근 코드 — 실제 운영 시 반드시 환경변수로 바꾸세요.
 #  · 관리자(나): 메인 허브(1~4차시 전체 + 모든 대시보드) 접근
@@ -64,7 +69,8 @@ def _get_session(sid, session, topic):
     if key not in SESSIONS:
         SESSIONS[key] = {
             "coder": ConversationCoder(sid, int(session), topic or "자유",
-                                       policy=NudgePolicy(session=int(session))),
+                                       policy=NudgePolicy(session=int(session)),
+                                       safety_llm=SAFETY_LLM),
             "messages": [], "updated": time.time(), "ack": True, "last": "",
             "last_elicited": False, "transcript": [],
         }
@@ -148,9 +154,10 @@ def handle_turn(body: dict) -> dict:
     coder, messages = S["coder"], S["messages"]
 
     # 직전 AI가 되물었는지를 이번 턴 계기 판정에 사용
+    # (coder.step 안에서 Layer1 키워드 + Layer3 LLM 2차로 입력 안전을 점검)
     res = coder.step(utterance, elicited_prev=S["last_elicited"])
     from dataclasses import asdict
-    _append_log(asdict(res["log"]))      # 코딩 시트 스키마로 적재
+    L = res["log"]
 
     messages.append({"role": "user", "content": utterance})
     S["updated"] = time.time()
@@ -160,13 +167,22 @@ def handle_turn(body: dict) -> dict:
     if res["safety"].ok:
         filled = sum(1 for v in coder.elements().values() if v)
         reply = llm.chat(messages, filled=filled, session=int(session))
-        messages.append({"role": "assistant", "content": reply})
-        S["last_elicited"] = _asks(reply)     # 이번 AI 응답이 되물었는가
+        out_sf = SafetyFilter().check(reply or "")     # Layer 2: AI 출력 안전 점검
+        if not out_sf.ok:
+            reply = None                               # 위험 출력 차단 → 교사 호출
+            res["safety"] = out_sf
+            L.개입 = "교사되돌림"
+            L.비고 = (L.비고 + f" 출력차단:{out_sf.category}").strip()
+            S["ack"] = False
+            S["last_elicited"] = False
+        else:
+            messages.append({"role": "assistant", "content": reply})
+            S["last_elicited"] = _asks(reply)          # 이번 AI 응답이 되물었는가
     else:
-        S["ack"] = False                      # 새 안전 알림 → 미확인
+        S["ack"] = False                               # 새 안전 알림 → 미확인
         S["last_elicited"] = False
 
-    L = res["log"]
+    _append_log(asdict(L))      # 최종 로그(출력 차단 반영) 적재
     entry = {"turn": L.턴, "student": utterance, "ai": reply,
              "계기": L.계기, "개입": L.개입,
              "safety_ok": res["safety"].ok, "category": res["safety"].category,

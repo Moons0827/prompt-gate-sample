@@ -183,11 +183,53 @@ class SafetyResult:
 
 
 class SafetyFilter:
+    """Layer 1(입력)·Layer 2(AI 출력) 공용 — 키워드 기반 빠른 게이트(fail-closed)."""
     def check(self, utterance: str) -> SafetyResult:
         for cat, cues in _SAFETY_CATEGORIES.items():
             if any(c in utterance for c in cues):
                 return SafetyResult(ok=False, level="escalate", category=cat)
         return SafetyResult(ok=True, level="clear")
+
+
+# ---- Layer 3: LLM 기반 2차 안전 분류기 (키워드가 놓친 우회·간접 표현 보완) ----
+SAFETY_SYSTEM_PROMPT = """너는 초등학생과 AI의 대화 안전을 점검하는 보조자다.
+학생의 발화가 다음 중 하나라도 실제로 해당하면 위험으로 본다.
+- 자해·정서위험: 자해·자살 암시, 사라지고 싶음, 심한 정서 위기
+- 폭력: 남을 해치려는 의도·협박
+- 성: 성적/선정적 내용
+- 개인정보: 이름 외 주소·전화번호·주민번호·비밀번호 등 노출
+- 괴롭힘: 따돌림·괴롭힘 정황
+맥락으로 판단하고, 애매하면 과잉 차단하지 말고 안전으로 본다.
+단, 자해·자살 신호는 조금이라도 의심되면 위험으로 본다.
+반드시 아래 JSON만 출력한다(설명 금지).
+{"risk": true/false, "category": "자해·정서위험|폭력|성|개인정보|괴롭힘|없음"}"""
+
+
+def _llm_safety_anthropic(text: str, model: str) -> dict:
+    import anthropic
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    msg = client.messages.create(
+        model=model, max_tokens=60,
+        system=SAFETY_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": text}],
+    )
+    return _parse_json(msg.content[0].text)
+
+
+def deep_safety_llm(text: str, model: Optional[str] = None) -> Optional[SafetyResult]:
+    """LLM으로 입력을 2차 점검. 위험이면 SafetyResult(ok=False), 안전이면 ok=True,
+    키가 없거나 호출 실패면 None(=키워드 결과 유지)."""
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        return None
+    model = model or os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+    try:
+        d = _llm_safety_anthropic(text, model)
+        if d.get("risk"):
+            return SafetyResult(ok=False, level="escalate", category=d.get("category") or "위험")
+        return SafetyResult(ok=True, level="clear")
+    except Exception as e:
+        print("[safety] LLM 2차 점검 실패 → 키워드 결과 유지:", e)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -212,11 +254,12 @@ class ConversationCoder:
 
     def __init__(self, 학생ID: str, 차시: int, 주제: str,
                  policy: Optional[NudgePolicy] = None, samples: int = 1,
-                 use_llm: Optional[bool] = None):
+                 use_llm: Optional[bool] = None, safety_llm: bool = False):
         self.meta = (학생ID, 차시, 주제)
         self.policy = policy or NudgePolicy(session=차시)
         self.samples = samples
         self.use_llm = use_llm
+        self.safety_llm = safety_llm     # Layer 3: LLM 2차 입력 점검 사용 여부
         self.safety = SafetyFilter()
         self._history: list[str] = []
         self._cum = {e: False for e in ELEMENTS}   # 누적 요소 상태
@@ -231,7 +274,11 @@ class ConversationCoder:
         self._turn += 1
         학생ID, 차시, 주제 = self.meta
 
-        safety = self.safety.check(utterance)
+        safety = self.safety.check(utterance)             # Layer 1: 키워드(입력)
+        if safety.ok and self.safety_llm:                 # Layer 3: LLM 2차(입력)
+            deep = deep_safety_llm(utterance)
+            if deep is not None and not deep.ok:
+                safety = deep
         detected = detect_elements(self._history, utterance,
                                    use_llm=self.use_llm, samples=self.samples)
 
