@@ -70,6 +70,7 @@
     <h2>이름을 알려줘</h2>
     <p>오늘은 <b>본명</b>으로 적어요. 선생님이 누구 대화인지 알 수 있어요.</p>
     <input id="nameInput" placeholder="본명 (예: 김민수)" maxlength="20" autofocus>
+    <div id="nameErr" style="display:none;font-size:13px;color:#c0392b;margin:-4px 0 12px;"></div>
     <button id="nameOk" disabled>시작하기</button>
   </div>
 </div>
@@ -108,15 +109,32 @@ let SESSION = LESSON;
 const overlay=document.getElementById("nameOverlay"),
       nameInput=document.getElementById("nameInput");
 const nameOk=document.getElementById("nameOk");
-function startWithName(){
+const nameErr=document.getElementById("nameErr");
+const TOKKEY = "pgtok_"+LESSON;              // 본인 재접속(새로고침) 식별용 — 브라우저 세션 한정
+async function startWithName(){
   const v=nameInput.value.trim();
-  if(!v){ nameInput.focus(); return; }   // 본명 필수 — 빈칸이면 시작하지 않음
+  if(!v){ nameInput.focus(); return; }       // 본명 필수 — 빈칸이면 시작하지 않음
+  nameErr.style.display="none"; nameOk.disabled=true; nameOk.textContent="확인 중…";
+  let tok=""; try{ tok=sessionStorage.getItem(TOKKEY)||""; }catch(e){}
+  try{
+    const r=await fetch("/api/join",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({student:v, session:SESSION, token:tok})});
+    const d=await r.json();
+    if(!d.ok){                               // 같은 이름이 지금 접속 중 → 시작 막고 안내
+      nameErr.textContent=d.error||"지금은 이 이름으로 시작할 수 없어요.";
+      nameErr.style.display="block";
+      nameOk.disabled=false; nameOk.textContent="시작하기";
+      return;
+    }
+    try{ if(d.token) sessionStorage.setItem(TOKKEY, d.token); }catch(e){}
+  }catch(e){ /* 네트워크 문제면 그냥 진행(수업 흐름 우선) */ }
   STUDENT_ID = v;
+  nameOk.textContent="시작하기";
   overlay.style.display="none"; document.getElementById("input").focus();
 }
 nameOk.addEventListener("click",startWithName);
 nameInput.addEventListener("keydown",e=>{if(e.key==="Enter")startWithName();});
-nameInput.addEventListener("input",()=>{ nameOk.disabled = !nameInput.value.trim(); });
+nameInput.addEventListener("input",()=>{ nameOk.disabled = !nameInput.value.trim(); nameErr.style.display="none"; });
 const SEED_SETS = {
   1:["급식 남는 거 줄이는 방법","좋아하는 게임 캐릭터 만들기","강아지 훈련시키는 법"],
   2:["우리 반 규칙 정하기","친구 생일 선물 고르기","방 청소 재밌게 하는 법"],

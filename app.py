@@ -11,7 +11,7 @@ prompt-gate 확장판 — 샘플 서버 (표준 라이브러리만 사용)
 prompt-gate(FastAPI)로 옮길 때: 아래 handle_turn 로직을 그대로 라우트에 넣으면 됨.
 detector.py / llm.py 는 프레임워크 독립이라 수정 없이 재사용.
 """
-import os, json, csv, time
+import os, json, csv, time, collections
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -62,7 +62,67 @@ def _load_dotenv():
 _load_dotenv()
 
 # (student_id, session) -> {coder, messages, ...}  (실행 중 캐시; 영속본은 store)
-SESSIONS = {}
+# OrderedDict + 상한(LRU) → 메모리 초과(OOM)로 인스턴스가 죽는 것을 막는다.
+# Neon(영속본)이 진짜 원본이므로, 캐시에서 밀려난 세션도 다음 접속 때 그대로 복원된다.
+SESSIONS = collections.OrderedDict()
+MAX_SESSIONS = int(os.environ.get("MAX_SESSIONS", 80))   # 캐시에 동시에 둘 최대 세션 수
+MAX_MESSAGES = int(os.environ.get("MAX_MESSAGES", 30))   # LLM에 보내는 최근 대화 길이 상한
+                                                          # (transcript에는 전체가 남으므로 기록 손실 없음)
+
+# 동일 이름 동시 접속 차단 — 메모리 전용(영속화 안 함, 작음, LRU 대상 아님).
+# (student_id, session) -> {"token": str, "seen": float}
+PRESENCE = {}
+JOIN_WINDOW = int(os.environ.get("JOIN_WINDOW", 20))     # 이 시간(초) 안에 활동이 있으면 '접속 중'으로 봄
+
+
+def _cache_put(key, S):
+    """세션을 캐시에 넣고 최신으로 표시. 상한을 넘으면 가장 오래된 것부터 내보낸다(영속본은 유지)."""
+    SESSIONS[key] = S
+    SESSIONS.move_to_end(key)
+    while len(SESSIONS) > MAX_SESSIONS:
+        SESSIONS.popitem(last=False)     # 가장 오래 안 쓴 세션 제거(다음 접속 때 store에서 복원)
+
+
+def _cap_messages(S):
+    """LLM 호출 비용/메모리를 위해 messages를 최근 MAX_MESSAGES개로 제한(대화 맥락은 충분히 유지)."""
+    m = S.get("messages")
+    if m and len(m) > MAX_MESSAGES:
+        S["messages"] = m[-MAX_MESSAGES:]
+
+
+def _touch_presence(sid, session):
+    """해당 이름이 '지금 접속 중'임을 갱신(턴 처리·폴링에서 호출 → 폴링이 심장박동 역할)."""
+    if not sid:
+        return
+    key = (sid, int(session))
+    p = PRESENCE.get(key)
+    if p:
+        p["seen"] = time.time()
+
+
+def handle_join(body):
+    """학생 입장 — 같은 이름이 '지금 접속 중'이면 막는다.
+       · 본인 새로고침(토큰 일치) → 허용(이어가기)
+       · 튕긴 뒤 재접속(활동 끊긴 지 오래) → 허용(이어가기)
+       · 다른 사람이 같은 이름으로 동시 접속 → 거절."""
+    import secrets
+    sid = (body.get("student") or "").strip()
+    session = int(body.get("session", 1))
+    token = (body.get("token") or "").strip()
+    if not sid:
+        return {"ok": False, "error": "이름을 입력해줘."}
+    key = (sid, session)
+    now = time.time()
+    p = PRESENCE.get(key)
+    active = p and (now - p.get("seen", 0) < JOIN_WINDOW)
+    if active and token != p.get("token"):
+        return {"ok": False, "busy": True,
+                "error": "지금 같은 이름으로 접속한 친구가 있어요. 이름 뒤에 번호를 붙이거나(예: 김민준2) 선생님께 말해줘요."}
+    # 허용 — 토큰 발급/갱신
+    if not token:
+        token = secrets.token_hex(8)
+    PRESENCE[key] = {"token": token, "seen": now}
+    return {"ok": True, "token": token}
 
 
 def _new_session(sid, session, topic):
@@ -116,8 +176,11 @@ def _get_session(sid, session, topic):
     key = (sid, int(session))
     if key not in SESSIONS:
         saved = store.get_state(sid, int(session))
-        SESSIONS[key] = _deserialize(saved, sid, session, topic) if saved \
+        S = _deserialize(saved, sid, session, topic) if saved \
             else _new_session(sid, session, topic)
+        _cache_put(key, S)
+    else:
+        SESSIONS.move_to_end(key)   # 최근 사용 표시(LRU)
     return SESSIONS[key]
 
 
@@ -197,6 +260,7 @@ def handle_turn(body: dict) -> dict:
         return {"error": "빈 발화"}
 
     S = _get_session(sid, session, topic)
+    _touch_presence(sid, session)   # 이 이름이 아직 접속 중임을 갱신
 
     # 연속 전송 방지: 마지막 전송 후 COOLDOWN_SEC 이내면 처리하지 않음(서버측 강제)
     now = time.time()
@@ -246,6 +310,7 @@ def handle_turn(body: dict) -> dict:
     S["transcript"].append(entry)
     _append_transcript({"time": time.strftime("%Y-%m-%d %H:%M:%S"),
                         "student_id": sid, "session": int(session), **entry})
+    _cap_messages(S)                 # LLM 맥락/메모리 상한(전체 기록은 transcript에 보존)
     _save_session(sid, session, S)   # ★ 매 턴 즉시 영속화 (튕겨도 이어가기)
 
     if blocked:
@@ -260,11 +325,13 @@ def _lookup_session(sid, session):
     """폴링 등 조회 전용 — 캐시에 있으면 그대로, 없으면 store에서 복원. 없으면 None(빈 세션 생성 안 함)."""
     key = (sid, int(session))
     if key in SESSIONS:
+        SESSIONS.move_to_end(key)
         return SESSIONS[key]
     st = store.get_state(sid, int(session))
     if st:
-        SESSIONS[key] = _deserialize(st, sid, session, "자유")
-        return SESSIONS[key]
+        S = _deserialize(st, sid, session, "자유")
+        _cache_put(key, S)
+        return S
     return None
 
 
@@ -306,6 +373,7 @@ def handle_allow_ai(sid, session):
 
 def handle_pending(sid, session):
     """학생 폴링 — 교사가 넣어준(또는 허용한) 답이 있으면 한 번 전달하고 슬롯을 비운다."""
+    _touch_presence(sid, session)   # 폴링이 곧 심장박동 — 접속 중 표시 갱신
     S = _lookup_session(sid, session)
     if S and S.get("pending_out"):
         reply = S["pending_out"]; S["pending_out"] = None
@@ -498,6 +566,8 @@ class Handler(BaseHTTPRequestHandler):
                 # 세션 쿠키(브라우저 닫으면 만료). 운영 시 HTTPS+Secure 권장.
                 self.send_header("Set-Cookie", f"pgauth={key}; Path=/; HttpOnly; SameSite=Lax")
                 self.end_headers(); self.wfile.write(data); return
+            if path == "/api/join":                        # 학생 입장 — 동일 이름 동시접속 차단
+                return self._send(200, handle_join(body))
             if path == "/api/turn":                        # 학생: 코드 불필요
                 return self._send(200, handle_turn(body))
 
