@@ -11,7 +11,7 @@ prompt-gate 확장판 — 샘플 서버 (표준 라이브러리만 사용)
 prompt-gate(FastAPI)로 옮길 때: 아래 handle_turn 로직을 그대로 라우트에 넣으면 됨.
 detector.py / llm.py 는 프레임워크 독립이라 수정 없이 재사용.
 """
-import os, json, csv, time, collections
+import os, json, csv, time, collections, re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -211,9 +211,31 @@ def _append_transcript(entry: dict):
         pass
 
 
+# 물음표 없이 끝나도 되묻기로 볼 의문형 어미(문장 '끝'에서만 인정).
+_Q_ENDINGS = ("니", "냐", "나요", "까", "까요", "래", "래요", "을래", "ㄹ래", "줄래",
+              "어때", "어때요", "은지", "는지", "은가", "는가", "ㄴ가")
+# 되묻기의 또 다른 형태 — '더 말해줘/알려줘'식으로 학생에게 정보를 더 청하는 유도.
+_INVITE_ENDINGS = ("말해줘", "말해 줘", "알려줘", "알려 줘", "적어줘", "적어봐",
+                   "말해줄래", "얘기해줘", "이야기해줘")
+# 따옴표로 감싼 '예시'(예: "'이거 맞아?'처럼")의 물음표에 속지 않도록 제거하는 패턴.
+_QUOTED = re.compile(r'[\'"“”‘’][^\'"“”‘’]*[\'"“”‘’]')
+_TAIL_TRIM = re.compile(r'[\s"\'”’」』)\]】.!…~]+$')
+
+
 def _asks(text: str) -> bool:
-    """AI 응답이 되묻기(유도)를 포함했는지 간단 판정."""
-    return bool(text) and ("?" in text or "까" in text[-3:] or "래" in text[-3:])
+    """AI 응답이 학생에게 '되묻기/유도'로 기능했는지 판정.
+       자발/유도 계기 판정 정확도를 위해 개선한 버전:
+        · 따옴표 예시 속 물음표는 무시(오탐 방지),
+        · 남은 본문에 진짜 물음표가 있으면 되묻기,
+        · 물음표가 없어도 끝이 의문형 어미거나 '더 말해줘'식 유도면 되묻기."""
+    if not text:
+        return False
+    t = text.strip()
+    cleaned = _QUOTED.sub(" ", t)      # 예시 인용 제거
+    if "?" in cleaned:                 # 예시가 아닌 실제 물음표 → 되묻기
+        return True
+    tail = _TAIL_TRIM.sub("", t)       # 끝 장식문자 정리 후 어미 검사
+    return tail.endswith(_Q_ENDINGS) or tail.endswith(_INVITE_ENDINGS)
 
 
 def compute_status(S: dict) -> tuple:
@@ -303,10 +325,12 @@ def handle_turn(body: dict) -> dict:
 
     blocked = not res["safety"].ok    # 입력/출력 안전 차단 → 교사 개입 대기
     _append_log(asdict(L))      # 최종 로그(출력 차단 반영) 적재
+    # 이번 턴에 '탐지된' 요소(누적 아님) — 사람 코딩과 대조해 코더 신뢰도(F1)를 재기 위해 별도 보관
+    turn_el = {"상황": int(L.상황), "조건": int(L.조건), "목적": int(L.목적), "대상": int(L.대상)}
     entry = {"turn": L.턴, "student": utterance, "ai": reply,
-             "계기": L.계기, "개입": L.개입,
+             "계기": L.계기, "개입": L.개입, "행위유형": L.행위유형,
              "safety_ok": res["safety"].ok, "category": res["safety"].category,
-             "elements": coder.elements(), "pending": blocked}
+             "elements": coder.elements(), "turn_elements": turn_el, "pending": blocked}
     S["transcript"].append(entry)
     _append_transcript({"time": time.strftime("%Y-%m-%d %H:%M:%S"),
                         "student_id": sid, "session": int(session), **entry})
@@ -406,17 +430,34 @@ def _export_bytes(fmt, only_session):
                         s.get("요소누적도"), s.get("대화유형"), s.get("자발비율"),
                         s.get("last"), s.get("level"), s.get("reason")])
         return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", f"학생별요약_{scope}_{stamp}.csv"
-    # 기본: 턴별 코딩
+    if fmt == "template":
+        # 사람 코딩용 빈 서식 — 학생/AI 발화만 채워주고 코드 칸은 비워 둔다.
+        # 코더 신뢰도 검증(F1·κ) 때 이 서식을 사람이 채운 뒤 validate.py로 기계 코딩과 대조한다.
+        buf = io.StringIO(); buf.write("﻿"); w = _csv.writer(buf)
+        w.writerow(["학생","차시","턴","학생발화","AI응답",
+                    "상황","조건","목적","대상","계기","개입","행위유형"])
+        for r in rows:
+            st = r.get("state") or {}
+            for t in st.get("transcript", []):
+                w.writerow([r["student_id"], r["session"], t.get("turn"),
+                            t.get("student") or "", t.get("ai") or "",
+                            "","","","","","",""])   # 사람이 채울 칸(빈칸)
+        return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", f"사람코딩서식_{scope}_{stamp}.csv"
+    # 기본: 턴별 코딩(기계) — 사람코딩서식과 열 이름이 같아 validate.py로 바로 대조 가능
     buf = io.StringIO(); buf.write("﻿"); w = _csv.writer(buf)
-    w.writerow(["학생","차시","턴","계기","개입","안전OK","위험범주","상황","조건","목적","대상","학생발화","AI응답"])
+    w.writerow(["학생","차시","턴","학생발화","AI응답",
+                "상황","조건","목적","대상","계기","개입","행위유형","안전OK","위험범주"])
     for r in rows:
         st = r.get("state") or {}
         for t in st.get("transcript", []):
-            e = t.get("elements", {}) or {}
-            w.writerow([r["student_id"], r["session"], t.get("turn"), t.get("계기"), t.get("개입"),
-                        t.get("safety_ok"), t.get("category") or "",
-                        e.get("상황"), e.get("조건"), e.get("목적"), e.get("대상"),
-                        t.get("student") or "", t.get("ai") or ""])
+            # 이번 턴 탐지 요소 우선, 구(舊)데이터는 누적 요소로 폴백
+            e = t.get("turn_elements") or t.get("elements", {}) or {}
+            w.writerow([r["student_id"], r["session"], t.get("turn"),
+                        t.get("student") or "", t.get("ai") or "",
+                        int(bool(e.get("상황"))), int(bool(e.get("조건"))),
+                        int(bool(e.get("목적"))), int(bool(e.get("대상"))),
+                        t.get("계기"), t.get("개입"), t.get("행위유형") or "",
+                        t.get("safety_ok"), t.get("category") or ""])
     return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", f"턴별코딩_{scope}_{stamp}.csv"
 
 

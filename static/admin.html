@@ -59,8 +59,10 @@
       <a class="btn pri" id="dlTurns">턴별 코딩 CSV</a>
       <a class="btn" id="dlSummary">학생별 요약 CSV</a>
       <a class="btn" id="dlJson">원본 JSON</a>
+      <a class="btn" id="dlTemplate">사람 코딩용 빈 서식</a>
     </div>
     <div style="font-size:12px;color:var(--sub);margin-top:8px;">학생 대화가 매 턴 자동 저장됩니다. 언제든 내려받아 분석·백업하세요. (본명 포함 — 분석 단계에선 익명화 권장)</div>
+    <div style="font-size:12px;color:var(--sub);margin-top:4px;">코더 신뢰도 검증: '빈 서식'을 사람이 채운 뒤 '턴별 코딩 CSV'와 함께 <code>python validate.py 턴별코딩.csv 사람코딩.csv</code> 로 F1·κ 확인.</div>
   </div>
 
   <div class="note">
@@ -107,6 +109,7 @@ function updExports(){
   document.getElementById("dlTurns").href="/api/export?fmt=turns&session="+s;
   document.getElementById("dlSummary").href="/api/export?fmt=summary&session="+s;
   document.getElementById("dlJson").href="/api/export?fmt=json&session="+s;
+  document.getElementById("dlTemplate").href="/api/export?fmt=template&session="+s;
 }
 document.getElementById("expScope").addEventListener("change",updExports); updExports();
 </script>
