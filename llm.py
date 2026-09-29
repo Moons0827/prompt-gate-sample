@@ -46,7 +46,7 @@ def _anthropic_chat(messages, session, model):
     import anthropic
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
     msg = client.messages.create(
-        model=model, max_tokens=200, temperature=0.7,
+        model=model, max_tokens=200,
         system=system_prompt(session), messages=messages,
     )
     return msg.content[0].text.strip()
