@@ -72,6 +72,7 @@ def _new_session(sid, session, topic):
                                    safety_llm=SAFETY_LLM),
         "messages": [], "updated": time.time(), "ack": True, "last": "",
         "last_elicited": False, "transcript": [], "last_turn_ts": 0,
+        "pending_out": None,   # 교사가 넣어줄(또는 허용한) 답을 학생 폴링으로 전달하는 슬롯
     }
 
 
@@ -85,6 +86,7 @@ def _serialize(S) -> dict:
         "messages": S["messages"], "ack": S["ack"], "last": S["last"],
         "last_elicited": S["last_elicited"], "updated": S["updated"],
         "last_turn_ts": S.get("last_turn_ts", 0), "transcript": S["transcript"],
+        "pending_out": S.get("pending_out"),
     }
 
 
@@ -105,6 +107,7 @@ def _deserialize(state: dict, sid, session, topic) -> dict:
     S["updated"] = float(state.get("updated", time.time()))
     S["last_turn_ts"] = float(state.get("last_turn_ts", 0))
     S["transcript"] = list(state.get("transcript", []))
+    S["pending_out"] = state.get("pending_out")
     return S
 
 
@@ -234,22 +237,119 @@ def handle_turn(body: dict) -> dict:
         S["ack"] = False                               # 새 안전 알림 → 미확인
         S["last_elicited"] = False
 
+    blocked = not res["safety"].ok    # 입력/출력 안전 차단 → 교사 개입 대기
     _append_log(asdict(L))      # 최종 로그(출력 차단 반영) 적재
     entry = {"turn": L.턴, "student": utterance, "ai": reply,
              "계기": L.계기, "개입": L.개입,
              "safety_ok": res["safety"].ok, "category": res["safety"].category,
-             "elements": coder.elements()}
+             "elements": coder.elements(), "pending": blocked}
     S["transcript"].append(entry)
     _append_transcript({"time": time.strftime("%Y-%m-%d %H:%M:%S"),
                         "student_id": sid, "session": int(session), **entry})
     _save_session(sid, session, S)   # ★ 매 턴 즉시 영속화 (튕겨도 이어가기)
 
-    return {
-        "reply": reply,
-        "elements": coder.elements(),
-        "safety": {"ok": res["safety"].ok, "category": res["safety"].category},
-        "summary": coder.summary(),
-    }
+    if blocked:
+        # 학생에겐 위험/차단 사실을 절대 노출하지 않는다 — '생각 중' 상태만 돌려주고,
+        # 교사가 답을 넣거나 'AI 허용'을 누르면 학생 폴링(/api/pending)으로 자연스럽게 전달된다.
+        return {"status": "waiting", "elements": coder.elements()}
+    return {"reply": reply, "elements": coder.elements(), "summary": coder.summary()}
+
+
+# ---- 교사 개입: 답변 넣어주기 / 사소한 위험 통과(AI 허용) / 학생 폴링 -----------
+def _lookup_session(sid, session):
+    """폴링 등 조회 전용 — 캐시에 있으면 그대로, 없으면 store에서 복원. 없으면 None(빈 세션 생성 안 함)."""
+    key = (sid, int(session))
+    if key in SESSIONS:
+        return SESSIONS[key]
+    st = store.get_state(sid, int(session))
+    if st:
+        SESSIONS[key] = _deserialize(st, sid, session, "자유")
+        return SESSIONS[key]
+    return None
+
+
+def _deliver_reply(sid, session, reply_text, kind):
+    """교사 답변/허용을 세션에 반영하고, 학생 폴링(/api/pending)으로 전달할 슬롯에 넣는다."""
+    S = _get_session(sid, session, "자유")
+    tr = S["transcript"]
+    target = next((e for e in reversed(tr) if e.get("pending")), None)
+    if target is not None:                      # 대기 중이던 차단 턴을 교사 답으로 채움
+        target["ai"] = reply_text; target["pending"] = False; target["개입"] = kind
+    else:                                        # 대기 턴이 없을 때의 일반 개입 — 새 항목
+        tr.append({"turn": (tr[-1]["turn"] + 1 if tr else 1), "student": "(선생님 개입)",
+                   "ai": reply_text, "계기": "없음", "개입": kind, "safety_ok": True,
+                   "category": None, "elements": S["coder"].elements(), "pending": False})
+    S["messages"].append({"role": "assistant", "content": reply_text})
+    S["pending_out"] = reply_text               # 학생 폴링이 가져가면 정상 AI 말풍선으로 표시
+    S["ack"] = True
+    S["last_elicited"] = _asks(reply_text)
+    S["updated"] = time.time()
+    _save_session(sid, session, S)
+
+
+def handle_teacher_reply(sid, session, text):
+    text = (text or "").strip()
+    if not text:
+        return {"error": "빈 답변"}
+    _deliver_reply(sid, session, text, "교사답변")
+    return {"ok": True}
+
+
+def handle_allow_ai(sid, session):
+    """사소한 위험 → 교사 판단으로 통과. AI가 정상적으로 답하게 만들어 학생에게 전달."""
+    S = _get_session(sid, session, "자유")
+    filled = sum(1 for v in S["coder"].elements().values() if v)
+    reply = llm.chat(S["messages"], filled=filled, session=int(session))  # 교사 승인 → 안전 재검사 생략
+    _deliver_reply(sid, session, reply, "교사허용")
+    return {"ok": True}
+
+
+def handle_pending(sid, session):
+    """학생 폴링 — 교사가 넣어준(또는 허용한) 답이 있으면 한 번 전달하고 슬롯을 비운다."""
+    S = _lookup_session(sid, session)
+    if S and S.get("pending_out"):
+        reply = S["pending_out"]; S["pending_out"] = None
+        _save_session(sid, session, S)
+        return {"reply": reply, "elements": S["coder"].elements()}
+    return {"reply": None}
+
+
+# ---- 로그 내보내기 (관리자) ---------------------------------------------------
+def _export_bytes(fmt, only_session):
+    import io, csv as _csv
+    rows = store.list_all(only_session)   # [{student_id, session, topic, state}]
+    stamp = time.strftime("%Y%m%d")
+    scope = "전체" if only_session is None else f"{only_session}차시"
+    if fmt == "json":
+        data = []
+        for r in rows:
+            st = r.get("state") or {}
+            data.append({"student_id": r["student_id"], "session": r["session"],
+                         "topic": r.get("topic"), "transcript": st.get("transcript", [])})
+        body = json.dumps({"exported": time.strftime("%Y-%m-%d %H:%M:%S"),
+                           "scope": scope, "count": len(data), "sessions": data},
+                          ensure_ascii=False, indent=2).encode("utf-8")
+        return body, "application/json; charset=utf-8", f"로그원본_{scope}_{stamp}.json"
+    if fmt == "summary":
+        buf = io.StringIO(); buf.write("﻿"); w = _csv.writer(buf)
+        w.writerow(["학생","차시","주제","턴수","요소누적도","대화유형","자발비율","마지막발화","수준","사유"])
+        for s in store.list_summaries(only_session):
+            w.writerow([s.get("student_id"), s.get("session"), s.get("topic"), s.get("turns"),
+                        s.get("요소누적도"), s.get("대화유형"), s.get("자발비율"),
+                        s.get("last"), s.get("level"), s.get("reason")])
+        return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", f"학생별요약_{scope}_{stamp}.csv"
+    # 기본: 턴별 코딩
+    buf = io.StringIO(); buf.write("﻿"); w = _csv.writer(buf)
+    w.writerow(["학생","차시","턴","계기","개입","안전OK","위험범주","상황","조건","목적","대상","학생발화","AI응답"])
+    for r in rows:
+        st = r.get("state") or {}
+        for t in st.get("transcript", []):
+            e = t.get("elements", {}) or {}
+            w.writerow([r["student_id"], r["session"], t.get("turn"), t.get("계기"), t.get("개입"),
+                        t.get("safety_ok"), t.get("category") or "",
+                        e.get("상황"), e.get("조건"), e.get("목적"), e.get("대상"),
+                        t.get("student") or "", t.get("ai") or ""])
+    return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", f"턴별코딩_{scope}_{stamp}.csv"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -322,9 +422,31 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(urlparse(self.path).query)
             sid = (q.get("student") or [""])[0]
             session = int((q.get("session") or ["1"])[0])
-            S = SESSIONS.get((sid, session))
+            S = _lookup_session(sid, session)     # 캐시 없으면 store에서 복원(재시작 후에도 보임)
             return self._send(200, {"student": sid, "session": session,
                                     "turns": S["transcript"] if S else []})
+        if path == "/api/pending":               # 학생 폴링 — 코드 불필요
+            q = parse_qs(urlparse(self.path).query)
+            sid = (q.get("student") or [""])[0]
+            session = int((q.get("session") or ["1"])[0])
+            if not sid:
+                return self._send(200, {"reply": None})
+            return self._send(200, handle_pending(sid, session))
+        if path == "/api/export":                # 관리자 전용 로그 내보내기
+            if role != "admin":
+                return self._send(403, {"error": "관리자만 내보낼 수 있습니다."})
+            q = parse_qs(urlparse(self.path).query)
+            fmt = (q.get("fmt") or ["turns"])[0]
+            sraw = (q.get("session") or ["all"])[0]
+            only = None if sraw in ("all", "", None) else int(sraw)
+            body, ctype, fname = _export_bytes(fmt, only)
+            from urllib.parse import quote
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Disposition",
+                             "attachment; filename*=UTF-8''" + quote(fname))
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body); return
         if path == "/api/whoami":
             return self._send(200, {"role": role or "none"})
         if path == "/logout":
@@ -389,6 +511,12 @@ class Handler(BaseHTTPRequestHandler):
                 S["ack"] = True
                 _save_session(sid, sess, S)                 # 확인 상태도 영속화(레벨 재계산)
                 return self._send(200, {"ok": True})
+            if path == "/api/teacher_reply":               # 교사: 학생에게 직접 답 보내기
+                sid = body.get("student_id"); sess = int(body.get("session", 1))
+                return self._send(200, handle_teacher_reply(sid, sess, body.get("text")))
+            if path == "/api/allow_ai":                    # 교사: 사소한 위험 통과 → AI가 답하게
+                sid = body.get("student_id"); sess = int(body.get("session", 1))
+                return self._send(200, handle_allow_ai(sid, sess))
             if path == "/api/reset":                        # 교사: 실습 초기화(해당 차시만)
                 sess = body.get("session")
                 if sess is None:

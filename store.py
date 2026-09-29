@@ -47,6 +47,14 @@ def _mem_list(only_session=None):
             continue
         out.append(row["summary"])
     return out
+def _mem_list_all(only_session=None):
+    out = []
+    for (sid, session), row in _MEM.items():
+        if only_session is not None and session != int(only_session):
+            continue
+        out.append({"student_id": sid, "session": session,
+                    "topic": row.get("topic"), "state": row.get("state")})
+    return out
 def _mem_clear(session=None):
     if session is None:
         _MEM.clear()
@@ -132,6 +140,16 @@ def _pg_clear(session=None):
         _pg_exec("DELETE FROM pg_session WHERE session=%s", (int(session),))
 
 
+def _pg_list_all(only_session=None):
+    if only_session is None:
+        rows = _pg_exec("SELECT student_id, session, topic, state FROM pg_session", fetch="all")
+    else:
+        rows = _pg_exec("SELECT student_id, session, topic, state FROM pg_session WHERE session=%s",
+                        (int(only_session),), fetch="all")
+    return [{"student_id": r[0], "session": r[1], "topic": r[2], "state": r[3]}
+            for r in (rows or [])]
+
+
 # ---------------------------------------------------------------------------
 # 공통 진입점
 # ---------------------------------------------------------------------------
@@ -170,6 +188,14 @@ def list_summaries(only_session=None):
         return _pg_list(only_session) if _USE_PG else _mem_list(only_session)
     except Exception as e:
         print("[store] list 실패:", e); return []
+
+
+def list_all(only_session=None):
+    """내보내기용 — 전체 상태(state 포함)를 반환."""
+    try:
+        return _pg_list_all(only_session) if _USE_PG else _mem_list_all(only_session)
+    except Exception as e:
+        print("[store] list_all 실패:", e); return []
 
 
 def clear(session=None):

@@ -89,6 +89,17 @@
       <button class="closeBtn" onclick="closeModal()">닫기</button>
     </header>
     <div class="body" id="mBody"></div>
+    <div class="replybar" style="border-top:1px solid var(--line);padding:12px 16px;display:flex;flex-direction:column;gap:8px;">
+      <div id="pendingNote" style="display:none;font-size:12.5px;color:var(--now);background:var(--now-bg);border:1px solid #e3b6af;border-radius:8px;padding:8px 10px;"></div>
+      <textarea id="replyText" placeholder="학생에게 보낼 답을 입력하세요…" style="width:100%;height:52px;resize:none;padding:9px 11px;border:1px solid var(--line);border-radius:8px;font-family:inherit;font-size:14px;"></textarea>
+      <div style="display:flex;gap:8px;justify-content:space-between;align-items:center;">
+        <span id="ackOnly" style="font-size:12px;color:var(--sub);text-decoration:underline;cursor:pointer;">답 없이 확인만</span>
+        <span style="display:flex;gap:8px;">
+          <button class="closeBtn" id="allowAiBtn" style="border-color:var(--ok);color:var(--ok);">AI가 답하게 (사소함 통과)</button>
+          <button class="closeBtn" id="sendReplyBtn" style="background:var(--ok);color:#fff;border-color:var(--ok);">답 보내기</button>
+        </span>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -122,7 +133,7 @@ async function load(){
     const stateLabel = r.level==="로그" ? "정상" : r.level;
     const elem = "●".repeat(r["요소누적도"]) + "○".repeat(4-r["요소누적도"]);
     const ackBtn = r.level==="즉시"
-      ? `<button class="ack" onclick="event.stopPropagation();ack('${r.student_id}',${r.session})">확인</button>`
+      ? `<button class="ack" onclick="event.stopPropagation();openTranscript('${r.student_id}',${r.session})">답하기</button>`
       : `<span class="view">대화 보기</span>`;
     tr.innerHTML =
       `<td class="state">${stateLabel}</td>`+
@@ -137,13 +148,22 @@ async function load(){
     tb.appendChild(tr);
   });
 }
+let CUR=null;
 async function openTranscript(sid, session){
+  CUR={sid, session};
   const modal=document.getElementById("modal"), body=document.getElementById("mBody");
   document.getElementById("mTitle").textContent = `${sid} · ${session}차시 대화 전문`;
+  document.getElementById("replyText").value="";
   body.innerHTML="<div style='color:#888'>불러오는 중…</div>"; modal.classList.add("on");
   let d;
   try{ d=await (await fetch(`/api/transcript?student=${encodeURIComponent(sid)}&session=${session}`)).json(); }
   catch(e){ body.innerHTML="<div style='color:#b4453a'>불러오기 실패</div>"; return; }
+  // 대기(안전 차단) 상태 배너 — 이 학생은 지금 '생각 중' 화면으로 답을 기다리고 있음
+  const pend=(d.turns||[]).find(t=>t.pending);
+  const note=document.getElementById("pendingNote");
+  if(pend){ note.style.display="block";
+    note.textContent=`⚠ 안전 신호로 학생이 답을 기다리는 중입니다${pend.category?" ("+pend.category+")":""}. 답을 넣거나 'AI가 답하게'를 누르면 학생 화면에 자연스럽게 전달됩니다. (학생은 위험 표시를 보지 못합니다)`; }
+  else { note.style.display="none"; }
   if(!d.turns || d.turns.length===0){ body.innerHTML="<div style='color:#888'>아직 대화 기록이 없습니다.</div>"; return; }
   body.innerHTML="";
   d.turns.forEach(t=>{
@@ -159,7 +179,29 @@ async function openTranscript(sid, session){
     wrap.innerHTML=html; body.appendChild(wrap);
   });
 }
-function closeModal(){ document.getElementById("modal").classList.remove("on"); }
+function closeModal(){ document.getElementById("modal").classList.remove("on"); CUR=null; }
+async function doPost(url, payload){
+  try{ return await (await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(payload)})).json(); }catch(e){ return {}; }
+}
+document.getElementById("sendReplyBtn").addEventListener("click", async ()=>{
+  if(!CUR) return;
+  const t=document.getElementById("replyText").value.trim();
+  if(!t){ document.getElementById("replyText").focus(); return; }
+  await doPost("/api/teacher_reply",{student_id:CUR.sid, session:CUR.session, text:t});
+  closeModal(); load();
+});
+document.getElementById("allowAiBtn").addEventListener("click", async ()=>{
+  if(!CUR) return;
+  if(!confirm("이 안전 신호를 사소한 것으로 보고 넘어갑니다. AI가 정상적으로 답하게 할까요?")) return;
+  await doPost("/api/allow_ai",{student_id:CUR.sid, session:CUR.session});
+  closeModal(); load();
+});
+document.getElementById("ackOnly").addEventListener("click", async ()=>{
+  if(!CUR) return;
+  await doPost("/api/ack",{student_id:CUR.sid, session:CUR.session});
+  closeModal(); load();
+});
 function escapeHtml(s){ return (s||"").replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 document.getElementById("modal").addEventListener("click",e=>{ if(e.target.id==="modal") closeModal(); });
 
