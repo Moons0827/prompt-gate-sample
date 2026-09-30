@@ -107,11 +107,17 @@ def _touch_presence(sid, session):
         p["seen"] = time.time()
 
 
+def _is_kicked(sid, session, token) -> bool:
+    """이 토큰이 더 이상 이 이름의 '소유자'가 아니면 True(다른 기기가 이어받음)."""
+    p = PRESENCE.get((sid, int(session)))
+    return bool(p and token and token != p.get("token"))
+
+
 def handle_join(body):
-    """학생 입장 — 같은 이름이 '지금 접속 중'이면 막는다.
-       · 본인 새로고침(토큰 일치) → 허용(이어가기)
-       · 튕긴 뒤 재접속(활동 끊긴 지 오래) → 허용(이어가기)
-       · 다른 사람이 같은 이름으로 동시 접속 → 거절."""
+    """학생 입장 — 동일 이름은 '이어받기(takeover)':
+       같은 이름으로 이미 접속 중이어도 막지 않고, 새 접속이 소유권을 가져온다.
+       기존 접속(이전 탭/기기)은 폴링에서 kicked 신호를 받아 종료된다.
+       과거 대화(transcript)·요소·직접대화를 함께 돌려줘 화면에 그대로 복원한다."""
     import secrets
     sid = (body.get("student") or "").strip()
     session = int(body.get("session", 1))
@@ -121,15 +127,23 @@ def handle_join(body):
     key = (sid, session)
     now = time.time()
     p = PRESENCE.get(key)
-    active = p and (now - p.get("seen", 0) < JOIN_WINDOW)
-    if active and token != p.get("token"):
-        return {"ok": False, "busy": True,
-                "error": "지금 같은 이름으로 접속한 친구가 있어요. 이름 뒤에 번호를 붙이거나(예: 김민준2) 선생님께 말해줘요."}
-    # 허용 — 토큰 발급/갱신
-    if not token:
+    active = bool(p and (now - p.get("seen", 0) < JOIN_WINDOW))
+    took_over = bool(active and token != p.get("token"))
+    # 본인 새로고침(토큰 일치)이면 기존 토큰 유지, 그 외에는 새 토큰 발급 → 이 토큰만 유효
+    if not token or took_over:
         token = secrets.token_hex(8)
-    PRESENCE[key] = {"token": token, "seen": now}
-    return {"ok": True, "token": token}
+    PRESENCE[key] = {"token": token, "seen": now}   # 이 순간 이전 토큰은 무효 → 이전 탭은 kicked
+    # 과거 대화 복원
+    S = _lookup_session(sid, session)
+    hist, elems, direct = [], {e: False for e in ELEMENTS}, []
+    if S:
+        for t in S["transcript"]:
+            hist.append({"student": t.get("student"), "ai": t.get("ai"),
+                         "pending": bool(t.get("pending"))})
+        elems = S["coder"].elements()
+        direct = list(S.get("direct", []))
+    return {"ok": True, "token": token, "took_over": took_over,
+            "history": hist, "elements": elems, "direct": direct}
 
 
 def _new_session(sid, session, topic):
@@ -139,7 +153,10 @@ def _new_session(sid, session, topic):
                                    safety_llm=SAFETY_LLM),
         "messages": [], "updated": time.time(), "ack": True, "last": "",
         "last_elicited": False, "transcript": [], "last_turn_ts": 0,
-        "pending_out": None,   # 교사가 넣어줄(또는 허용한) 답을 학생 폴링으로 전달하는 슬롯
+        "outbox": [],          # 학생 폴링(/api/pending)으로 내보낼 메시지 큐(교사답변·허용·전체공지)
+        "direct": [],          # 학생↔교사 1:1 직접 대화 [{from:'student'|'teacher', text, ts}]
+        "call": False,         # 학생이 '선생님 부르기'를 눌렀는가(대시보드에 호출 표시)
+        "call_ts": 0,
     }
 
 
@@ -153,7 +170,8 @@ def _serialize(S) -> dict:
         "messages": S["messages"], "ack": S["ack"], "last": S["last"],
         "last_elicited": S["last_elicited"], "updated": S["updated"],
         "last_turn_ts": S.get("last_turn_ts", 0), "transcript": S["transcript"],
-        "pending_out": S.get("pending_out"),
+        "outbox": S.get("outbox", []), "direct": S.get("direct", []),
+        "call": S.get("call", False), "call_ts": S.get("call_ts", 0),
     }
 
 
@@ -174,7 +192,14 @@ def _deserialize(state: dict, sid, session, topic) -> dict:
     S["updated"] = float(state.get("updated", time.time()))
     S["last_turn_ts"] = float(state.get("last_turn_ts", 0))
     S["transcript"] = list(state.get("transcript", []))
-    S["pending_out"] = state.get("pending_out")
+    # outbox: 구(舊)데이터의 pending_out 단일 슬롯도 흡수
+    ob = list(state.get("outbox", []))
+    if state.get("pending_out"):
+        ob.append(state["pending_out"])
+    S["outbox"] = ob
+    S["direct"] = list(state.get("direct", []))
+    S["call"] = bool(state.get("call", False))
+    S["call_ts"] = float(state.get("call_ts", 0))
     return S
 
 
@@ -200,7 +225,7 @@ def _dash_row(sid, session, S) -> dict:
         "turns": s["총턴수"], "요소누적도": s["요소누적도"],
         "대화유형": s["대화유형"], "자발비율": s["자발비율"],
         "last": (S.get("last") or "")[:30], "level": level, "reason": reason,
-        "updated": S["updated"],
+        "updated": S["updated"], "call": bool(S.get("call")),
     }
 
 
@@ -287,6 +312,10 @@ def handle_turn(body: dict) -> dict:
     utterance = (body.get("utterance") or "").strip()
     if not utterance:
         return {"error": "빈 발화"}
+
+    # 다른 기기가 같은 이름으로 이어받았으면 이 탭은 종료
+    if _is_kicked(sid, session, (body.get("token") or "").strip()):
+        return {"kicked": True}
 
     S = _get_session(sid, session, topic)
     _touch_presence(sid, session)   # 이 이름이 아직 접속 중임을 갱신
@@ -391,7 +420,7 @@ def _deliver_reply(sid, session, reply_text, kind):
                    "ai": reply_text, "계기": "없음", "개입": kind, "safety_ok": True,
                    "category": None, "elements": S["coder"].elements(), "pending": False})
     S["messages"].append({"role": "assistant", "content": reply_text})
-    S["pending_out"] = reply_text               # 학생 폴링이 가져가면 정상 AI 말풍선으로 표시
+    S.setdefault("outbox", []).append(reply_text)   # 학생 폴링이 순서대로 가져가 정상 AI 말풍선으로 표시
     S["ack"] = True
     S["last_elicited"] = _asks(reply_text)
     S["updated"] = time.time()
@@ -415,15 +444,72 @@ def handle_allow_ai(sid, session):
     return {"ok": True}
 
 
-def handle_pending(sid, session):
-    """학생 폴링 — 교사가 넣어준(또는 허용한) 답이 있으면 한 번 전달하고 슬롯을 비운다."""
+def handle_pending(sid, session, token=""):
+    """학생 폴링 — 큐(outbox)에 쌓인 교사답변·허용·전체공지를 순서대로 하나씩 전달.
+       이어받기 종료(kicked)도 여기서 알린다."""
+    if _is_kicked(sid, session, token):
+        return {"kicked": True}
     _touch_presence(sid, session)   # 폴링이 곧 심장박동 — 접속 중 표시 갱신
     S = _lookup_session(sid, session)
-    if S and S.get("pending_out"):
-        reply = S["pending_out"]; S["pending_out"] = None
+    if not S:
+        return {"reply": None}
+    ob = S.get("outbox") or []
+    if ob:
+        reply = ob.pop(0)
         _save_session(sid, session, S)
         return {"reply": reply, "elements": S["coder"].elements()}
     return {"reply": None}
+
+
+def handle_direct(sid, session, since=0):
+    """1:1 직접 대화 조회 — since 이후의 메시지와 호출 상태를 돌려준다(학생·교사 공용)."""
+    S = _lookup_session(sid, session)
+    if not S:
+        return {"direct": [], "total": 0, "call": False}
+    d = S.get("direct") or []
+    return {"direct": d[since:], "total": len(d), "call": bool(S.get("call"))}
+
+
+def handle_call(sid, session):
+    """학생이 '선생님 부르기'를 누름 → 호출 플래그 ON(대시보드에 표시)."""
+    S = _get_session(sid, session, "자유")
+    S["call"] = True; S["call_ts"] = time.time()
+    _save_session(sid, session, S)
+    return {"ok": True}
+
+
+def handle_direct_send(sid, session, text, who):
+    """1:1 직접 대화에 메시지 추가. who='student'|'teacher'. 교사가 답하면 호출 해제."""
+    text = (text or "").strip()
+    if not text:
+        return {"error": "빈 메시지"}
+    S = _get_session(sid, session, "자유")
+    S.setdefault("direct", []).append({"from": who, "text": text,
+                                       "ts": time.strftime("%H:%M")})
+    if who == "student":
+        S["call"] = True; S["call_ts"] = time.time()   # 학생이 말하면 호출로도 표시
+    else:
+        S["call"] = False                              # 교사가 응답하면 호출 해제
+    S["updated"] = time.time()
+    _save_session(sid, session, S)
+    return {"ok": True, "direct_total": len(S["direct"])}
+
+
+def handle_broadcast(text, only_session=None):
+    """관리자/교사 전체 공지 — 모든(또는 해당 차시) 학생의 outbox에 안내 메시지를 넣는다."""
+    text = (text or "").strip()
+    if not text:
+        return {"error": "빈 공지"}
+    msg = "📢 [선생님 공지] " + text
+    n = 0
+    for r in store.list_all(only_session):     # 영속본 기준 전체 학생
+        sid, sess = r["student_id"], r["session"]
+        S = _get_session(sid, sess, r.get("topic") or "자유")
+        S.setdefault("outbox", []).append(msg)
+        S["updated"] = time.time()
+        _save_session(sid, sess, S)
+        n += 1
+    return {"ok": True, "count": n}
 
 
 # ---- 로그 내보내기 (관리자) ---------------------------------------------------
@@ -567,9 +653,18 @@ class Handler(BaseHTTPRequestHandler):
             q = parse_qs(urlparse(self.path).query)
             sid = (q.get("student") or [""])[0]
             session = int((q.get("session") or ["1"])[0])
+            token = (q.get("token") or [""])[0]
             if not sid:
                 return self._send(200, {"reply": None})
-            return self._send(200, handle_pending(sid, session))
+            return self._send(200, handle_pending(sid, session, token))
+        if path == "/api/direct":                # 1:1 직접 대화 조회 — 학생(본인)·교사 공용
+            q = parse_qs(urlparse(self.path).query)
+            sid = (q.get("student") or [""])[0]
+            session = int((q.get("session") or ["1"])[0])
+            since = int((q.get("since") or ["0"])[0])
+            if not sid:
+                return self._send(200, {"direct": [], "total": 0, "call": False})
+            return self._send(200, handle_direct(sid, session, since))
         if path == "/api/health":                 # 교사/관리자 — 서비스 상태(품질저하·정지)
             if role not in ("admin", "teacher"):
                 return self._send(403, {"error": "권한이 필요합니다."})
@@ -644,10 +739,20 @@ class Handler(BaseHTTPRequestHandler):
                 # 세션 쿠키(브라우저 닫으면 만료). 운영 시 HTTPS+Secure 권장.
                 self.send_header("Set-Cookie", f"pgauth={key}; Path=/; HttpOnly; SameSite=Lax")
                 self.end_headers(); self.wfile.write(data); return
-            if path == "/api/join":                        # 학생 입장 — 동일 이름 동시접속 차단
+            if path == "/api/join":                        # 학생 입장 — 동일 이름 이어받기
                 return self._send(200, handle_join(body))
             if path == "/api/turn":                        # 학생: 코드 불필요
                 return self._send(200, handle_turn(body))
+            if path == "/api/call":                        # 학생: 선생님 호출벨
+                sid = (body.get("student") or "").strip()
+                sess = int(body.get("session", 1))
+                if not sid: return self._send(200, {"error": "이름 없음"})
+                return self._send(200, handle_call(sid, sess))
+            if path == "/api/direct_send":                 # 학생: 1:1 직접 대화에 보내기
+                sid = (body.get("student") or "").strip()
+                sess = int(body.get("session", 1))
+                if not sid: return self._send(200, {"error": "이름 없음"})
+                return self._send(200, handle_direct_send(sid, sess, body.get("text"), "student"))
 
             # 아래는 교사/관리자만
             role = self._role()
@@ -665,6 +770,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/allow_ai":                    # 교사: 사소한 위험 통과 → AI가 답하게
                 sid = body.get("student_id"); sess = int(body.get("session", 1))
                 return self._send(200, handle_allow_ai(sid, sess))
+            if path == "/api/direct_reply":                # 교사: 1:1 직접 대화에 답하기(호출 해제)
+                sid = body.get("student_id"); sess = int(body.get("session", 1))
+                return self._send(200, handle_direct_send(sid, sess, body.get("text"), "teacher"))
+            if path == "/api/broadcast":                   # 교사/관리자: 전체 학생에게 공지
+                sraw = body.get("session")
+                only = None if sraw in (None, "", "all") else int(sraw)
+                return self._send(200, handle_broadcast(body.get("text"), only))
             if path == "/api/pause":                       # 관리자/교사: 전역 비상 정지 토글
                 global PAUSED
                 PAUSED = bool(body.get("on"))

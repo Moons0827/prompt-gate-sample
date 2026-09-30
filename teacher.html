@@ -70,6 +70,11 @@
   <div id="healthBanner" style="display:none;font-size:13px;margin:10px 0;padding:9px 12px;
     border-radius:8px;border:1px solid #e3b6af;background:var(--now-bg);color:var(--now);"></div>
 
+  <div style="display:flex;gap:8px;align-items:center;margin:10px 0;flex-wrap:wrap;">
+    <input id="bcastText" placeholder="전체 학생에게 보낼 공지…" style="flex:1;min-width:180px;font-size:13px;padding:7px 10px;border:1px solid var(--line);border-radius:8px;font-family:inherit;">
+    <button id="bcastBtn" style="font-size:13px;padding:7px 14px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;">📢 전체 공지</button>
+  </div>
+
   <div class="counts">
     <div class="count now"><div class="n" id="c-now">0</div><div class="l">즉시 — 안전 개입</div></div>
     <div class="count warn"><div class="n" id="c-warn">0</div><div class="l">주의 — 반복 정체</div></div>
@@ -106,6 +111,15 @@
           <button class="closeBtn" id="allowAiBtn" style="border-color:var(--ok);color:var(--ok);">AI가 답하게 (사소함 통과)</button>
           <button class="closeBtn" id="sendReplyBtn" style="background:var(--ok);color:#fff;border-color:var(--ok);">답 보내기</button>
         </span>
+      </div>
+      <div style="border-top:1px dashed var(--line);padding-top:10px;">
+        <div id="callFlag" style="display:none;font-size:12.5px;color:var(--now);font-weight:700;margin-bottom:6px;">🔔 이 학생이 선생님을 불렀어요</div>
+        <div style="font-size:12px;color:var(--sub);margin-bottom:4px;">1:1 직접 대화 (학생 화면에만 뜸 · AI와 분리)</div>
+        <div id="directBox" style="max-height:140px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;padding:8px;margin-bottom:6px;background:#fafafa;font-size:13px;"></div>
+        <div style="display:flex;gap:6px;">
+          <textarea id="directReply" placeholder="학생과 직접 대화…" style="flex:1;height:40px;resize:none;padding:8px 10px;border:1px solid var(--line);border-radius:8px;font-family:inherit;font-size:13px;"></textarea>
+          <button class="closeBtn" id="directReplyBtn" style="background:var(--accent,#2b4a63);color:#fff;border-color:var(--accent,#2b4a63);">보내기</button>
+        </div>
       </div>
     </div>
   </div>
@@ -182,8 +196,8 @@ async function load(){
       ? `<button class="ack" onclick="event.stopPropagation();openTranscript('${r.student_id}',${r.session})">답하기</button>`
       : `<span class="view">대화 보기</span>`;
     tr.innerHTML =
-      `<td class="state">${stateLabel}</td>`+
-      `<td>${r.student_id}</td>`+
+      `<td class="state">${r.call?'🔔 ':''}${stateLabel}</td>`+
+      `<td>${r.call?'<b style="color:var(--now)">'+r.student_id+'</b>':r.student_id}</td>`+
       `<td>${r.session}차시</td>`+
       `<td>${r.topic}</td>`+
       `<td>${r.turns}</td>`+
@@ -224,8 +238,50 @@ async function openTranscript(sid, session){
     html+=`<div class="tags">턴 ${t.turn} · 요소[${els}] · 계기:${t["계기"]} · 개입:${t["개입"]}</div>`;
     wrap.innerHTML=html; body.appendChild(wrap);
   });
+  startDirect(sid, session);   // 1:1 직접 대화 로드/폴링 시작
 }
-function closeModal(){ document.getElementById("modal").classList.remove("on"); CUR=null; }
+function closeModal(){ document.getElementById("modal").classList.remove("on"); CUR=null; stopDirect(); }
+
+// ── 1:1 직접 대화(교사측) ─────────────────────────────────────────
+let directTimer=null;
+function renderTDirect(arr, call){
+  document.getElementById("callFlag").style.display = call ? "block":"none";
+  const box=document.getElementById("directBox");
+  if(!arr.length){ box.innerHTML='<span style="color:#999">아직 직접 대화가 없어요.</span>'; return; }
+  box.innerHTML="";
+  arr.forEach(m=>{
+    const t=m.from==="teacher";
+    const row=document.createElement("div");
+    row.style.cssText="margin:4px 0;text-align:"+(t?"right":"left");
+    row.innerHTML='<span style="display:inline-block;max-width:80%;padding:6px 10px;border-radius:10px;'
+      +(t?"background:var(--accent,#2b4a63);color:#fff;":"background:#e9ebee;color:#111;")+'">'+escapeHtml(m.text)+'</span>';
+    box.appendChild(row);
+  });
+  box.scrollTop=box.scrollHeight;
+}
+async function pollTDirect(){
+  if(!CUR) return;
+  try{ const d=await (await fetch(`/api/direct?student=${encodeURIComponent(CUR.sid)}&session=${CUR.session}&since=0`)).json();
+    renderTDirect(d.direct||[], d.call); }catch(e){}
+}
+function startDirect(sid,session){ pollTDirect(); if(!directTimer) directTimer=setInterval(pollTDirect,3000); }
+function stopDirect(){ if(directTimer){ clearInterval(directTimer); directTimer=null; } }
+document.getElementById("directReplyBtn").addEventListener("click", async ()=>{
+  if(!CUR) return;
+  const el=document.getElementById("directReply"); const t=el.value.trim(); if(!t) return;
+  el.value="";
+  await doPost("/api/direct_reply",{student_id:CUR.sid, session:CUR.session, text:t});
+  pollTDirect();
+});
+document.getElementById("directReply").addEventListener("keydown",e=>{
+  if(e.key==="Enter"&&!e.shiftKey){ e.preventDefault(); document.getElementById("directReplyBtn").click(); }});
+// 전체 공지(브로드캐스트)
+document.getElementById("bcastBtn").addEventListener("click", async ()=>{
+  const el=document.getElementById("bcastText"); const t=el.value.trim(); if(!t) return;
+  if(!confirm("이 차시 전체 학생에게 공지를 보낼까요?\n\n"+t)) return;
+  const r=await doPost("/api/broadcast",{text:t, session:SCOPE});
+  el.value=""; alert((r&&r.count!=null)?(r.count+"명에게 공지를 보냈어요."):"공지를 보냈어요.");
+});
 async function doPost(url, payload){
   try{ return await (await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},
     body:JSON.stringify(payload)})).json(); }catch(e){ return {}; }
