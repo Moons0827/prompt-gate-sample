@@ -1,0 +1,258 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI와 함께 이야기하기</title>
+<style>
+  :root{
+    --bg:#f4f1ea; --panel:#ffffff; --ink:#2b2b2b; --sub:#6f6a61;
+    --line:#e3ddd1; --accent:#2f6f5b; --accent-soft:#e5efe9;
+    --student:#dCE7f2; --nudge-bg:#fff4d6; --nudge-line:#e6c65a;
+    --warn:#b4453a; --warn-bg:#f7e4e1;
+  }
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Pretendard","Apple SD Gothic Neo","Malgun Gothic",sans-serif;
+    display:flex;justify-content:center;}
+  .app{width:100%;max-width:620px;min-height:100vh;background:var(--panel);
+    display:flex;flex-direction:column;border-left:1px solid var(--line);border-right:1px solid var(--line);}
+  header{padding:14px 18px;border-bottom:1px solid var(--line);
+    display:flex;align-items:center;justify-content:space-between;gap:10px;}
+  header .title{font-size:18px;font-weight:700;}
+  .watch{font-size:13px;color:var(--accent);background:var(--accent-soft);
+    padding:5px 10px;border-radius:14px;white-space:nowrap;}
+  .demo-ctrl{font-size:12px;color:var(--sub);display:flex;align-items:center;gap:6px;}
+  .demo-ctrl select{font-size:12px;padding:2px 4px;border:1px solid var(--line);border-radius:6px;}
+  .growth{display:flex;gap:8px;padding:10px 18px;border-bottom:1px solid var(--line);
+    background:#faf8f3;align-items:center;flex-wrap:wrap;}
+  .growth .lead{font-size:12px;color:var(--sub);margin-right:2px;}
+  .dot{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--sub);
+    padding:4px 9px;border-radius:12px;border:1px solid var(--line);background:#fff;transition:.25s;}
+  .dot .mark{width:9px;height:9px;border-radius:50%;background:var(--line);transition:.25s;}
+  .dot.on{color:var(--accent);border-color:var(--accent);background:var(--accent-soft);font-weight:600;}
+  .dot.on .mark{background:var(--accent);}
+  .chat{flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:12px;}
+  .msg{max-width:80%;padding:10px 13px;border-radius:14px;font-size:15px;line-height:1.5;white-space:pre-wrap;}
+  .msg.ai{align-self:flex-start;background:#f0ede6;border:1px solid var(--line);border-bottom-left-radius:4px;}
+  .msg.me{align-self:flex-end;background:var(--student);border-bottom-right-radius:4px;}
+  .nudge{align-self:flex-start;max-width:82%;background:var(--nudge-bg);
+    border:1px solid var(--nudge-line);border-radius:12px;padding:9px 12px;font-size:14px;line-height:1.5;}
+  .nudge b{color:#8a6d13;}
+  .sys{align-self:center;text-align:center;font-size:13px;color:var(--warn);
+    background:var(--warn-bg);border:1px solid #e3b6af;border-radius:10px;padding:8px 12px;max-width:88%;}
+  .seeds{padding:16px 18px;border-top:1px solid var(--line);background:#faf8f3;}
+  .seeds p{margin:0 0 9px;font-size:14px;color:var(--sub);}
+  .seed-chips{display:flex;flex-wrap:wrap;gap:8px;}
+  .seed{font-size:13.5px;padding:7px 12px;border:1px solid var(--line);border-radius:16px;background:#fff;cursor:pointer;}
+  .seed:hover{border-color:var(--accent);color:var(--accent);}
+  .composer{display:flex;gap:8px;padding:12px 14px;border-top:1px solid var(--line);}
+  .composer textarea{flex:1;resize:none;height:44px;padding:11px 12px;font-size:15px;
+    border:1px solid var(--line);border-radius:12px;font-family:inherit;}
+  .composer textarea:focus{outline:none;border-color:var(--accent);}
+  .composer button{padding:0 18px;background:var(--accent);color:#fff;border:none;
+    border-radius:12px;font-size:15px;font-weight:600;cursor:pointer;}
+  .composer button:disabled{background:#b8c4bf;cursor:default;}
+  .overlay{position:fixed;inset:0;background:rgba(43,43,43,.45);display:flex;
+    align-items:center;justify-content:center;z-index:10;}
+  .card{background:#fff;border-radius:14px;padding:26px 24px;width:88%;max-width:340px;text-align:center;}
+  .card h2{margin:0 0 6px;font-size:19px;}
+  .card p{margin:0 0 16px;font-size:13.5px;color:var(--sub);}
+  .card input{width:100%;padding:11px 12px;font-size:15px;border:1px solid var(--line);
+    border-radius:10px;margin-bottom:12px;font-family:inherit;}
+  .card button{width:100%;padding:11px;background:var(--accent);color:#fff;border:none;
+    border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;}
+</style>
+</head>
+<body>
+<div class="overlay" id="nameOverlay">
+  <div class="card">
+    <h2>이름을 알려줘</h2>
+    <p>오늘은 <b>본명</b>으로 적어요. 선생님이 누구 대화인지 알 수 있어요.</p>
+    <input id="nameInput" placeholder="본명 (예: 김민수)" maxlength="20" autofocus>
+    <div id="nameErr" style="display:none;font-size:13px;color:#c0392b;margin:-4px 0 12px;"></div>
+    <button id="nameOk" disabled>시작하기</button>
+  </div>
+</div>
+<div class="app">
+  <header>
+    <div>
+      <div class="title">AI와 함께 이야기하기</div>
+      <div id="lessonSub" style="font-size:12px;color:var(--sub);margin-top:2px;">1차시 · 말을 더하면 답이 달라져요</div>
+    </div>
+    <span class="watch">선생님이 함께 보고 있어요</span>
+  </header>
+  <div class="growth" id="growth">
+    <span class="lead">내 대화가 자라고 있어요</span>
+    <span class="dot" data-e="상황"><span class="mark"></span>상황</span>
+    <span class="dot" data-e="조건"><span class="mark"></span>조건</span>
+    <span class="dot" data-e="목적"><span class="mark"></span>목적</span>
+    <span class="dot" data-e="대상"><span class="mark"></span>대상</span>
+  </div>
+  <div class="chat" id="chat">
+    <div class="msg ai">안녕! 무엇이든 궁금하거나 하고 싶은 걸 편하게 말해줘. 아래 예시처럼 시작해도 되고, 네 얘기를 해도 돼.</div>
+  </div>
+  <div class="seeds" id="seeds">
+    <p>이건 그냥 예시야 — 네 주제로 시작해도 좋아.</p>
+    <div class="seed-chips" id="seedChips"></div>
+  </div>
+  <div class="composer">
+    <textarea id="input" placeholder="여기에 이야기를 적어보자"></textarea>
+    <button id="send">보내기</button>
+  </div>
+</div>
+
+<script>
+let STUDENT_ID = "";
+const LESSON = parseInt("__LESSON__", 10) || 1;   // 서버가 담당 차시를 주입(기본 1차시)
+let SESSION = LESSON;
+const overlay=document.getElementById("nameOverlay"),
+      nameInput=document.getElementById("nameInput");
+const nameOk=document.getElementById("nameOk");
+const nameErr=document.getElementById("nameErr");
+const TOKKEY = "pgtok_"+LESSON;              // 본인 재접속(새로고침) 식별용 — 브라우저 세션 한정
+async function startWithName(){
+  const v=nameInput.value.trim();
+  if(!v){ nameInput.focus(); return; }       // 본명 필수 — 빈칸이면 시작하지 않음
+  nameErr.style.display="none"; nameOk.disabled=true; nameOk.textContent="확인 중…";
+  let tok=""; try{ tok=sessionStorage.getItem(TOKKEY)||""; }catch(e){}
+  try{
+    const r=await fetch("/api/join",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({student:v, session:SESSION, token:tok})});
+    const d=await r.json();
+    if(!d.ok){                               // 같은 이름이 지금 접속 중 → 시작 막고 안내
+      nameErr.textContent=d.error||"지금은 이 이름으로 시작할 수 없어요.";
+      nameErr.style.display="block";
+      nameOk.disabled=false; nameOk.textContent="시작하기";
+      return;
+    }
+    try{ if(d.token) sessionStorage.setItem(TOKKEY, d.token); }catch(e){}
+  }catch(e){ /* 네트워크 문제면 그냥 진행(수업 흐름 우선) */ }
+  STUDENT_ID = v;
+  nameOk.textContent="시작하기";
+  overlay.style.display="none"; document.getElementById("input").focus();
+}
+nameOk.addEventListener("click",startWithName);
+nameInput.addEventListener("keydown",e=>{if(e.key==="Enter")startWithName();});
+nameInput.addEventListener("input",()=>{ nameOk.disabled = !nameInput.value.trim(); nameErr.style.display="none"; });
+const SEED_SETS = {
+  1:["급식 남는 거 줄이는 방법","좋아하는 게임 캐릭터 만들기","강아지 훈련시키는 법"],
+  2:["우리 반 규칙 정하기","친구 생일 선물 고르기","방 청소 재밌게 하는 법"],
+  3:["용돈 모으는 계획","무서운 꿈 안 꾸는 법","동생이랑 안 싸우는 법"],
+  4:["여행 가고 싶은 곳 정하기","내가 만들고 싶은 발명품","친구랑 화해하는 법"]
+};
+const chat=document.getElementById("chat"), input=document.getElementById("input"),
+      sendBtn=document.getElementById("send");
+
+function bubble(cls,text){const d=document.createElement("div");d.className=cls;d.textContent=text;
+  chat.appendChild(d);chat.scrollTop=chat.scrollHeight;}
+// 대기 안내 문구 — 여기만 고치면 됨.
+// A안: 선생님 언급 없이 'AI가 꼼꼼히 생각 중'처럼 보이게 해 아이가 걸린 걸 눈치채지 못하게 함.
+const WAIT_MSGS = [
+  "음… 이건 좀 더 생각해볼게. 조금만 기다려줄래?",
+  "좋은 질문이라 더 꼼꼼히 답하고 있어. 잠깐만!",
+  "이건 신중하게 답하고 싶어서 조금 오래 걸려. 금방 올게!",
+];
+const WAIT_MSGS_2 = [   // 오래 걸릴 때 한 번 더 안심시키는 문구
+  "거의 다 됐어, 조금만 더!",
+  "조금만 더 기다려줘, 열심히 생각 중!",
+];
+// 자해·정서위험일 때만: 방법·진단 없이 따뜻하게, 믿을 수 있는 어른에게 말하도록 안내.
+const CARE_MSGS = [
+  "네 이야기 잘 듣고 있어. 지금 마음이 많이 힘들면 옆에 계신 선생님이나 믿을 수 있는 어른에게 꼭 말해줘. 넌 혼자가 아니야.",
+  "이야기해줘서 고마워. 힘든 마음이 들 땐 곁에 있는 선생님께 말해도 괜찮아. 잠깐만 여기서 기다려줄래?",
+];
+function pick(a){ return a[Math.floor(Math.random()*a.length)]; }
+
+let typingEl=null, waitTimers=[];
+function showTyping(care){ if(typingEl) return;
+  typingEl=document.createElement("div"); typingEl.className="msg ai"; typingEl.textContent="💭 …";
+  chat.appendChild(typingEl); chat.scrollTop=chat.scrollHeight;
+  if(care){                                   // 즉시 따뜻한 케어 안내(이모지 없이)
+    const m=pick(CARE_MSGS);
+    waitTimers.push(setTimeout(()=>{ if(typingEl) typingEl.textContent=m; }, 600));
+    return;
+  }
+  waitTimers.push(setTimeout(()=>{ if(typingEl) typingEl.textContent="💭 "+pick(WAIT_MSGS); }, 5000));
+  waitTimers.push(setTimeout(()=>{ if(typingEl) typingEl.textContent="💭 "+pick(WAIT_MSGS_2); }, 25000));
+}
+function hideTyping(){ waitTimers.forEach(clearTimeout); waitTimers=[];
+  if(typingEl){ typingEl.remove(); typingEl=null; } }
+function nudgeBubble(text){const d=document.createElement("div");d.className="nudge";
+  d.innerHTML="<b>잠깐!</b> "+text;chat.appendChild(d);chat.scrollTop=chat.scrollHeight;}
+function updateGrowth(elems){document.querySelectorAll("#growth .dot").forEach(el=>{
+  el.classList.toggle("on", !!(elems&&elems[el.dataset.e]));});}
+
+const COOLDOWN_MS = 5000;   // 연속 전송 방지: 5초 (서버 COOLDOWN_SEC와 맞춤)
+let cooling=false;
+function startCooldown(ms){
+  cooling=true; sendBtn.disabled=true;
+  let left=Math.ceil((ms||COOLDOWN_MS)/1000);
+  sendBtn.textContent=left+"초";
+  const iv=setInterval(()=>{
+    left--;
+    if(left<=0){ clearInterval(iv); cooling=false; sendBtn.disabled=false;
+      sendBtn.textContent="보내기"; input.focus(); }
+    else sendBtn.textContent=left+"초";
+  },1000);
+}
+
+async function send(){
+  if(!STUDENT_ID || cooling) return;          // 쿨다운 중에는 전송 막음
+  const v=input.value.trim(); if(!v) return;
+  input.value=""; sendBtn.disabled=true;
+  bubble("msg me", v);
+  try{
+    const r=await fetch("/api/turn",{method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({student_id:STUDENT_ID, session:SESSION, utterance:v})});
+    const d=await r.json();
+    if(d.cooldown){                            // 서버가 너무 빠른 전송을 차단
+      bubble("sys", d.error || "조금만 천천히 보내요.");
+      startCooldown(); return;
+    }
+    if(d.error){ bubble("sys","오류: "+d.error); sendBtn.disabled=false; input.focus(); return; }
+    if(d.status==="waiting"){                   // 답 준비 중 — 학생에겐 '생각 중'으로만 보임
+      updateGrowth(d.elements);
+      showTyping(d.care); awaiting=true;        // care면 따뜻한 안내, 아니면 A안 대기 문구
+      return;                                   // 답이 올 때 쿨다운 시작
+    }
+    if(d.reply) bubble("msg ai", d.reply);
+    updateGrowth(d.elements);
+    startCooldown();                           // 정상 전송 후 쿨다운
+  }catch(e){ bubble("sys","연결 오류: 서버가 켜져 있는지 확인해줘.");
+    sendBtn.disabled=false; input.focus(); }
+}
+sendBtn.addEventListener("click",send);
+input.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();send();}});
+
+function renderSeeds(){const box=document.getElementById("seedChips");box.innerHTML="";
+  SEED_SETS[SESSION].forEach(s=>{const c=document.createElement("span");c.className="seed";c.textContent=s;
+    c.addEventListener("click",()=>{input.value=s;input.focus();});box.appendChild(c);});}
+
+const LESSON_META={
+  1:"1차시 · 말을 더하면 답이 달라져요",
+  2:"2차시 · 한 번 더 물어 더 좋게",
+  3:"3차시 · 스스로 점검하기",
+  4:"4차시 · 내 질문 습관 만들기"};
+document.getElementById("lessonSub").textContent = LESSON_META[LESSON] || "";
+renderSeeds(); updateGrowth({});
+
+// 교사가 넣어준 답(또는 'AI 허용') 수신 — 학생은 위험을 전혀 알 수 없이 평범한 답으로 받음
+let awaiting=false;
+async function pollPending(){
+  if(!STUDENT_ID) return;
+  try{
+    const r=await fetch("/api/pending?student="+encodeURIComponent(STUDENT_ID)+"&session="+SESSION);
+    const d=await r.json();
+    if(d && d.reply){
+      hideTyping();
+      bubble("msg ai", d.reply);
+      updateGrowth(d.elements);
+      if(awaiting){ awaiting=false; startCooldown(); }
+    }
+  }catch(e){}
+}
+setInterval(pollPending, 6000);   // 폴링 주기 6초 — 서버 부하(요청 수) 절감
+</script>
+</body>
+</html>

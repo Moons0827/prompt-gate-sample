@@ -44,13 +44,20 @@ DETECT_SYSTEM_PROMPT = """너는 초등학교 5·6학년 학생이 AI에게 보�
 - 목적: 무엇을 원하는지 (예: "화해하고 싶어", "~하는 법")
 - 대상: 누구를/누구에게 (예: "5개월 푸들", "예민한 친구")
 
+또한 같은 호출에서 '이번 학생 발화'의 안전 위험도 함께 판정하라(비용 절감을 위해 요소 탐지와 통합).
+다음 중 하나라도 실제로 해당하면 risk=true, 아니면 false:
+- 자해·정서위험: 자해·자살 암시, 사라지고 싶음, 심한 정서 위기
+- 폭력: 남을 해치려는 의도·협박 / 성: 성적·선정적 / 개인정보: 주소·전화·주민번호·비밀번호 노출 / 괴롭힘: 따돌림·괴롭힘
+맥락으로 판단하고 애매하면 과잉 차단하지 않되, 자해·자살 신호는 조금이라도 의심되면 risk=true.
+
 규칙:
 1) 키워드가 아니라 '내용'으로 판단한다. 막연하면 없음(false)으로 본다.
 2) 각 요소는 대화에 한 번이라도 실질적으로 등장했으면 true.
 3) 반드시 아래 JSON 형식으로만 답한다. 설명 문장을 덧붙이지 않는다.
 
 {"상황": bool, "조건": bool, "목적": bool, "대상": bool,
- "confidence": 0.0~1.0, "rationale": "한 줄 근거"}"""
+ "confidence": 0.0~1.0, "risk": bool,
+ "category": "자해·정서위험|폭력|성|개인정보|괴롭힘|없음", "rationale": "한 줄 근거"}"""
 
 
 def _build_user_prompt(history: list[str], utterance: str) -> str:
@@ -62,7 +69,9 @@ def _build_user_prompt(history: list[str], utterance: str) -> str:
 
 def _llm_detect_anthropic(history, utterance, model: str) -> dict:
     import anthropic  # 실 환경에서만 임포트
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    # 타임아웃·재시도 제한 → 느린 호출이 스레드를 오래 붙잡아 서버가 멈추는 것 방지
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"],
+                                 timeout=25.0, max_retries=1)
     msg = client.messages.create(
         model=model, max_tokens=300,
         system=DETECT_SYSTEM_PROMPT,
@@ -92,7 +101,9 @@ def _mock_detect(history, utterance, **_) -> dict:
     text = " ".join(history + [utterance])
     found = {e: any(c in text for c in cues) for e, cues in _MOCK_CUES.items()}
     conf = 0.55  # mock은 확신도 낮게 표시 → 사람 확인 플래그 유도
-    return {**found, "confidence": conf, "rationale": "MOCK 규칙 기반(연구용 아님)"}
+    # mock은 안전 판정을 하지 않는다(키워드 Layer1이 담당) → risk=False
+    return {**found, "confidence": conf, "risk": False, "category": "없음",
+            "rationale": "MOCK 규칙 기반(연구용 아님)"}
 
 
 def detect_elements(history: list[str], utterance: str,
@@ -124,6 +135,9 @@ def detect_elements(history: list[str], utterance: str,
         out[e] = Counter(votes).most_common(1)[0][0]
         out.setdefault("_agree", {})[e] = votes.count(out[e]) / len(votes)
     out["confidence"] = sum(out["_agree"].values()) / len(ELEMENTS)
+    # 안전(risk)은 보수적으로: 한 번이라도 위험이면 위험으로 본다
+    out["risk"] = any(bool(r.get("risk")) for r in runs)
+    out["category"] = next((r.get("category") for r in runs if r.get("risk")), "없음")
     out["rationale"] = f"self-consistency n={samples}"
     return out
 
@@ -275,12 +289,13 @@ class ConversationCoder:
         학생ID, 차시, 주제 = self.meta
 
         safety = self.safety.check(utterance)             # Layer 1: 키워드(입력)
-        if safety.ok and self.safety_llm:                 # Layer 3: LLM 2차(입력)
-            deep = deep_safety_llm(utterance)
-            if deep is not None and not deep.ok:
-                safety = deep
+        # 요소 탐지 — 같은 호출에서 안전(risk)까지 함께 판정(턴당 LLM 호출 3→2로 절감)
         detected = detect_elements(self._history, utterance,
                                    use_llm=self.use_llm, samples=self.samples)
+        # Layer 3(LLM 2차 안전): 탐지 호출에 통합됨 → 추가 호출 없이 위험이면 교사 에스컬레이션
+        if safety.ok and detected.get("risk"):
+            safety = SafetyResult(ok=False, level="escalate",
+                                  category=detected.get("category") or "위험")
 
         # 이번 턴에 '처음' 참이 된 요소만 신규로 계산
         newly = [e for e in ELEMENTS if detected.get(e) and not self._cum[e]]

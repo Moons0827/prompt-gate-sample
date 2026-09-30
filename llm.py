@@ -55,7 +55,9 @@ def chat(messages: list[dict], filled: int = 0, session: int = 1,
 
 def _anthropic_chat(messages, session, model):
     import anthropic
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+    # 타임아웃·재시도 제한 → 느린 호출이 스레드를 오래 붙잡아 서버가 멈추는 것 방지
+    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"],
+                                 timeout=25.0, max_retries=1)
     msg = client.messages.create(
         model=model, max_tokens=200,
         system=system_prompt(session), messages=messages,
