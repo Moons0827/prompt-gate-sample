@@ -27,11 +27,21 @@ import os
 import re
 import json
 import csv
+import time
 from dataclasses import dataclass, field, asdict
 from collections import Counter
 from typing import Optional, Callable
 
 ELEMENTS = ["상황", "조건", "목적", "대상"]
+
+# 탐지(=안전 통합) 실 호출이 실패해 mock으로 떨어진 마지막 시각.
+# mock은 안전(risk) 판정을 못 하므로, 이 값이 최근이면 LLM 안전점검이 약화된 상태 → 교사 화면에 경고.
+_DEGRADED_AT = 0.0
+
+
+def degraded_recently(window: int = 120) -> bool:
+    """최근 window초 안에 탐지/안전 LLM 호출이 실패한 적이 있으면 True."""
+    return _DEGRADED_AT > 0 and (time.time() - _DEGRADED_AT) < window
 
 # ---------------------------------------------------------------------------
 # 1) LLM 클라이언트 (실 호출부) — 키 없으면 mock으로 자동 대체
@@ -120,6 +130,8 @@ def detect_elements(history: list[str], utterance: str,
         try:
             return _llm_detect_anthropic(history, utterance, model)
         except Exception as e:
+            global _DEGRADED_AT
+            _DEGRADED_AT = time.time()      # 안전점검 약화 신호 기록(교사 화면 경고용)
             print("[detect] LLM 호출 실패 → mock 대체:", e)
             return _mock_detect(history, utterance)
 

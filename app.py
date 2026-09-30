@@ -470,44 +470,58 @@ def handle_direct(sid, session, since=0):
     return {"direct": d[since:], "total": len(d), "call": bool(S.get("call"))}
 
 
+DIRECT_COOLDOWN = int(os.environ.get("DIRECT_COOLDOWN", 2))  # 학생측 호출·직접전송 연타 방지(초)
+MAX_DIRECT = 100                                             # 직접대화 보관 최대 개수(무한증가 방지)
+
+
 def handle_call(sid, session):
-    """학생이 '선생님 부르기'를 누름 → 호출 플래그 ON(대시보드에 표시)."""
+    """학생이 '선생님 부르기'를 누름 → 호출 플래그 ON(대시보드에 표시). 연타는 무시."""
     S = _get_session(sid, session, "자유")
-    S["call"] = True; S["call_ts"] = time.time()
+    now = time.time()
+    if now - S.get("last_direct_ts", 0) < DIRECT_COOLDOWN:
+        return {"ok": True, "throttled": True}
+    S["last_direct_ts"] = now
+    S["call"] = True; S["call_ts"] = now
     _save_session(sid, session, S)
     return {"ok": True}
 
 
 def handle_direct_send(sid, session, text, who):
-    """1:1 직접 대화에 메시지 추가. who='student'|'teacher'. 교사가 답하면 호출 해제."""
+    """1:1 직접 대화에 메시지 추가. who='student'|'teacher'. 교사가 답하면 호출 해제.
+       학생측은 연타 쿨다운, 기록은 최근 MAX_DIRECT개로 제한."""
     text = (text or "").strip()
     if not text:
         return {"error": "빈 메시지"}
     S = _get_session(sid, session, "자유")
-    S.setdefault("direct", []).append({"from": who, "text": text,
-                                       "ts": time.strftime("%H:%M")})
+    now = time.time()
+    if who == "student" and now - S.get("last_direct_ts", 0) < DIRECT_COOLDOWN:
+        return {"ok": True, "throttled": True}       # 도배 방지 — 조용히 무시
+    d = S.setdefault("direct", [])
+    d.append({"from": who, "text": text[:500], "ts": time.strftime("%H:%M")})
+    if len(d) > MAX_DIRECT:
+        del d[:len(d) - MAX_DIRECT]                  # 오래된 것부터 잘라 최근 100개만 유지
     if who == "student":
-        S["call"] = True; S["call_ts"] = time.time()   # 학생이 말하면 호출로도 표시
+        S["call"] = True; S["call_ts"] = now; S["last_direct_ts"] = now
     else:
-        S["call"] = False                              # 교사가 응답하면 호출 해제
-    S["updated"] = time.time()
+        S["call"] = False                            # 교사가 응답하면 호출 해제
+    S["updated"] = now
     _save_session(sid, session, S)
-    return {"ok": True, "direct_total": len(S["direct"])}
+    return {"ok": True, "direct_total": len(d)}
 
 
 def handle_broadcast(text, only_session=None):
-    """관리자/교사 전체 공지 — 모든(또는 해당 차시) 학생의 outbox에 안내 메시지를 넣는다."""
+    """전체 공지 — 접속 중(메모리 캐시)인 학생의 outbox에 즉시 넣는다.
+       DB를 학생 수만큼 두드리지 않아 빠르고 안전(hang 방지). 접속 중이 아닌 학생은
+       어차피 폴링을 안 하므로 대상에서 제외된다."""
     text = (text or "").strip()
     if not text:
         return {"error": "빈 공지"}
     msg = "📢 [선생님 공지] " + text
     n = 0
-    for r in store.list_all(only_session):     # 영속본 기준 전체 학생
-        sid, sess = r["student_id"], r["session"]
-        S = _get_session(sid, sess, r.get("topic") or "자유")
+    for (sid, sess), S in list(SESSIONS.items()):
+        if only_session is not None and sess != int(only_session):
+            continue
         S.setdefault("outbox", []).append(msg)
-        S["updated"] = time.time()
-        _save_session(sid, sess, S)
         n += 1
     return {"ok": True, "count": n}
 
@@ -669,9 +683,10 @@ class Handler(BaseHTTPRequestHandler):
             if role not in ("admin", "teacher"):
                 return self._send(403, {"error": "권한이 필요합니다."})
             has_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
+            from detector import degraded_recently as _det_degraded
+            degraded = bool(llm.degraded_recently() or _det_degraded())
             return self._send(200, {"mode": "live" if has_key else "mock",
-                                    "degraded": bool(llm.degraded_recently()),
-                                    "paused": PAUSED})
+                                    "degraded": degraded, "paused": PAUSED})
         if path == "/api/export":                # 관리자 전용 로그 내보내기
             if role != "admin":
                 return self._send(403, {"error": "관리자만 내보낼 수 있습니다."})
