@@ -10,6 +10,9 @@ from __future__ import annotations
 import os, random, time
 
 DEFAULT_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
+# 답변 최대 토큰 — 너무 낮으면 한국어 답이 중간에 잘린다(기존 200 → 512).
+# 상한일 뿐이라 짧은 답은 알아서 짧게 끝나므로 비용은 거의 그대로.
+MAX_REPLY_TOKENS = int(os.environ.get("MAX_REPLY_TOKENS", 512))
 
 # 실 LLM 호출이 '예외로' mock 대체된 마지막 시각(키가 아예 없는 정상 mock 모드는 제외).
 # 관리자/교사 화면에서 '조용한 품질 저하'를 감지하는 데 쓴다.
@@ -59,7 +62,7 @@ def _anthropic_chat(messages, session, model):
     client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"],
                                  timeout=25.0, max_retries=1)
     msg = client.messages.create(
-        model=model, max_tokens=200,
+        model=model, max_tokens=MAX_REPLY_TOKENS,
         system=system_prompt(session), messages=messages,
     )
     return msg.content[0].text.strip()
