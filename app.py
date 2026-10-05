@@ -526,6 +526,18 @@ def handle_broadcast(text, only_session=None):
     return {"ok": True, "count": n}
 
 
+def handle_delete_student(sid, session):
+    """특정 학생(한 명·한 차시)의 대화 전체 삭제 — 캐시·접속상태·영속본 모두 제거."""
+    sid = (sid or "").strip()
+    if not sid:
+        return {"error": "학생을 지정해주세요."}
+    sess = int(session)
+    SESSIONS.pop((sid, sess), None)      # 실행 중 캐시
+    PRESENCE.pop((sid, sess), None)      # 접속 상태
+    store.delete(sid, sess)              # 영속본(Neon/메모리)
+    return {"ok": True}
+
+
 # ---- 로그 내보내기 (관리자) ---------------------------------------------------
 def _export_bytes(fmt, only_session, anon=True):
     """anon=True(기본): 학생 실명을 S01·S02…로 익명화(논문·공유 안전).
@@ -796,6 +808,9 @@ class Handler(BaseHTTPRequestHandler):
                 global PAUSED
                 PAUSED = bool(body.get("on"))
                 return self._send(200, {"ok": True, "paused": PAUSED})
+            if path == "/api/delete_student":              # 교사: 특정 학생 대화 삭제
+                sid = body.get("student_id"); sess = int(body.get("session", 1))
+                return self._send(200, handle_delete_student(sid, sess))
             if path == "/api/reset":                        # 교사: 실습 초기화(해당 차시만)
                 sess = body.get("session")
                 if sess is None:

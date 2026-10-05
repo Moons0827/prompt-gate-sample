@@ -61,6 +61,8 @@ def _mem_clear(session=None):
     else:
         for k in [k for k in _MEM if k[1] == int(session)]:
             del _MEM[k]
+def _mem_delete(sid, session):
+    _MEM.pop((sid, int(session)), None)
 
 
 # ---------------------------------------------------------------------------
@@ -140,6 +142,11 @@ def _pg_clear(session=None):
         _pg_exec("DELETE FROM pg_session WHERE session=%s", (int(session),))
 
 
+def _pg_delete(sid, session):
+    _pg_exec("DELETE FROM pg_session WHERE student_id=%s AND session=%s",
+             (sid, int(session)))
+
+
 def _pg_list_all(only_session=None):
     if only_session is None:
         rows = _pg_exec("SELECT student_id, session, topic, state FROM pg_session", fetch="all")
@@ -203,3 +210,11 @@ def clear(session=None):
         (_pg_clear if _USE_PG else _mem_clear)(session)
     except Exception as e:
         print("[store] clear 실패:", e)
+
+
+def delete(sid, session):
+    """특정 학생(한 명·한 차시)의 영속본만 삭제."""
+    try:
+        (_pg_delete if _USE_PG else _mem_delete)(sid, session)
+    except Exception as e:
+        print("[store] delete 실패:", e)

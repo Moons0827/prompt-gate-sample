@@ -95,7 +95,10 @@
   <div class="sheet">
     <header style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;">
       <b id="mTitle">대화 전문</b>
-      <button class="closeBtn" onclick="closeModal()">닫기</button>
+      <span style="display:flex;gap:8px;">
+        <button class="closeBtn" id="delStudentBtn" style="border-color:var(--now);color:var(--now);">🗑 대화 삭제</button>
+        <button class="closeBtn" onclick="closeModal()">닫기</button>
+      </span>
     </header>
     <div class="body" id="mBody"></div>
     <div class="replybar" style="border-top:1px solid var(--line);padding:12px 16px;display:flex;flex-direction:column;gap:8px;">
@@ -241,6 +244,12 @@ async function openTranscript(sid, session){
   startDirect(sid, session);   // 1:1 직접 대화 로드/폴링 시작
 }
 function closeModal(){ document.getElementById("modal").classList.remove("on"); CUR=null; stopDirect(); }
+document.getElementById("delStudentBtn").addEventListener("click", async ()=>{
+  if(!CUR) return;
+  if(!confirm(`'${CUR.sid}' 학생의 ${CUR.session}차시 대화를 완전히 삭제할까요?\n\n되돌릴 수 없습니다.`)) return;
+  await doPost("/api/delete_student",{student_id:CUR.sid, session:CUR.session});
+  closeModal(); load();
+});
 
 // ── 1:1 직접 대화(교사측) ─────────────────────────────────────────
 let directTimer=null;
