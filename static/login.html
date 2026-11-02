@@ -42,6 +42,11 @@ async function go(){
       body:JSON.stringify({key})});
     const d=await r.json();
     if(!d.ok){ errEl.textContent=d.error||"코드가 올바르지 않습니다."; return; }
+    // 관리자 화면에 교사 코드를 넣은 경우: 교사 대시보드로 보내지 않고 안내만 한다
+    if(WANT==="admin" && d.role!=="admin"){
+      await fetch("/logout").catch(()=>{});
+      errEl.textContent="이 코드는 교사 코드입니다. 관리자 허브에는 관리자 코드(ADMIN_KEY)를 입력하세요."; return;
+    }
     // 로그인 성공 → 원래 가려던 곳으로
     const next=new URLSearchParams(location.search).get("next");
     if(next){ location.href=next; }
