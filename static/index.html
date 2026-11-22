@@ -32,6 +32,14 @@
   .dot .mark{width:9px;height:9px;border-radius:50%;background:var(--line);transition:.25s;}
   .dot.on{color:var(--accent);border-color:var(--accent);background:var(--accent-soft);font-weight:600;}
   .dot.on .mark{background:var(--accent);}
+  /* 이전 이야기에서 켜졌던 요소: 바로 끄지 않고 흐리게 남겨 둠 */
+  .dot.dim{color:var(--accent);border-color:var(--accent);opacity:.6;}
+  .dot.dim .mark{background:var(--accent);opacity:.6;}
+  .growth{position:relative;}
+  .topic-toast{position:absolute;right:18px;top:50%;transform:translateY(-50%);font-size:12px;
+    color:var(--accent);background:#fff;border:1px solid var(--accent);border-radius:12px;
+    padding:3px 10px;opacity:0;transition:opacity .4s;pointer-events:none;}
+  .topic-toast.show{opacity:1;}
   .chat{flex:1;overflow-y:auto;padding:18px;display:flex;flex-direction:column;gap:12px;}
   .msg{max-width:80%;padding:10px 13px;border-radius:14px;font-size:15px;line-height:1.5;white-space:pre-wrap;}
   .msg.ai{align-self:flex-start;background:#f0ede6;border:1px solid var(--line);border-bottom-left-radius:4px;}
@@ -91,6 +99,7 @@
     <span class="dot" data-e="조건"><span class="mark"></span>조건</span>
     <span class="dot" data-e="목적"><span class="mark"></span>목적</span>
     <span class="dot" data-e="대상"><span class="mark"></span>대상</span>
+    <span class="topic-toast" id="topicToast">새 이야기를 시작했네!</span>
   </div>
   <div class="chat" id="chat">
     <div class="msg ai">안녕! 무엇이든 궁금하거나 하고 싶은 걸 편하게 말해줘. 아래 예시처럼 시작해도 되고, 네 얘기를 해도 돼.</div>
@@ -147,13 +156,13 @@ async function startWithName(){
     }
     TOKEN=d.token||""; try{ sessionStorage.setItem(TOKKEY, TOKEN); }catch(e){}
     STUDENT_ID=v;
-    restoreHistory(d.history||[], d.elements||{});   // 지난 대화 화면에 복원
+    restoreHistory(d.history||[], d.elements||{}, d.dim||{});   // 지난 대화 화면에 복원
   }catch(e){ STUDENT_ID=v; }                          // 네트워크 문제면 그냥 진행
   nameOk.textContent="시작하기";
   overlay.style.display="none"; document.getElementById("input").focus();
 }
 
-function restoreHistory(hist, elems){
+function restoreHistory(hist, elems, dim){
   if(hist && hist.length){
     hist.forEach(t=>{
       if(t.student && t.student!=="(선생님 개입)") bubble("msg me", t.student);
@@ -161,7 +170,7 @@ function restoreHistory(hist, elems){
     });
     bubble("sys","— 여기서부터 이어서 계속하면 돼 —");
   }
-  updateGrowth(elems||{});
+  updateGrowth(elems||{}, dim||{});
 }
 
 function showKicked(){
@@ -218,8 +227,14 @@ function hideTyping(){ waitTimers.forEach(clearTimeout); waitTimers=[];
   if(typingEl){ typingEl.remove(); typingEl=null; } }
 function nudgeBubble(text){const d=document.createElement("div");d.className="nudge";
   d.innerHTML="<b>잠깐!</b> "+text;chat.appendChild(d);chat.scrollTop=chat.scrollHeight;}
-function updateGrowth(elems){document.querySelectorAll("#growth .dot").forEach(el=>{
-  el.classList.toggle("on", !!(elems&&elems[el.dataset.e]));});}
+function updateGrowth(elems, dim){document.querySelectorAll("#growth .dot").forEach(el=>{
+  const on=!!(elems&&elems[el.dataset.e]);
+  el.classList.toggle("on", on);
+  el.classList.toggle("dim", !on && !!(dim&&dim[el.dataset.e]));});}
+let toastTimer=null;
+function topicToast(){const t=document.getElementById("topicToast"); if(!t) return;
+  t.classList.add("show"); clearTimeout(toastTimer);
+  toastTimer=setTimeout(()=>t.classList.remove("show"), 3000);}
 
 const COOLDOWN_MS = 5000;   // 연속 전송 방지: 5초 (서버 COOLDOWN_SEC와 맞춤)
 let cooling=false;
@@ -251,12 +266,12 @@ async function send(){
     }
     if(d.error){ bubble("sys","오류: "+d.error); sendBtn.disabled=false; input.focus(); return; }
     if(d.status==="waiting"){                   // 답 준비 중 — 학생에겐 '생각 중'으로만 보임
-      updateGrowth(d.elements);
+      updateGrowth(d.elements, d.dim); if(d.topic_shift) topicToast();
       showTyping(d.care); awaiting=true;        // care면 따뜻한 안내, 아니면 A안 대기 문구
       return;                                   // 답이 올 때 쿨다운 시작
     }
     if(d.reply) bubble("msg ai", d.reply);
-    updateGrowth(d.elements);
+    updateGrowth(d.elements, d.dim); if(d.topic_shift) topicToast();
     startCooldown();                           // 정상 전송 후 쿨다운
   }catch(e){ bubble("sys","연결 오류: 서버가 켜져 있는지 확인해줘.");
     sendBtn.disabled=false; input.focus(); }
@@ -287,7 +302,7 @@ async function pollPending(){
     if(d && d.reply){
       hideTyping();
       bubble("msg ai", d.reply);
-      updateGrowth(d.elements);
+      updateGrowth(d.elements, d.dim);
       if(awaiting){ awaiting=false; startCooldown(); }
     }
   }catch(e){}
