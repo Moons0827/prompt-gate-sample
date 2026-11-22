@@ -136,14 +136,16 @@ def handle_join(body):
     # 과거 대화 복원
     S = _lookup_session(sid, session)
     hist, elems, direct = [], {e: False for e in ELEMENTS}, []
+    dim = {e: False for e in ELEMENTS}
     if S:
         for t in S["transcript"]:
             hist.append({"student": t.get("student"), "ai": t.get("ai"),
                          "pending": bool(t.get("pending"))})
         elems = S["coder"].elements()
+        dim = S["coder"].dim()
         direct = list(S.get("direct", []))
     return {"ok": True, "token": token, "took_over": took_over,
-            "history": hist, "elements": elems, "direct": direct}
+            "history": hist, "elements": elems, "dim": dim, "direct": direct}
 
 
 def _new_session(sid, session, topic):
@@ -166,6 +168,8 @@ def _serialize(S) -> dict:
     c = S["coder"]
     return {
         "coder": {"history": c._history, "cum": c._cum, "turn": c._turn,
+                  "cum_session": c._cum_session, "topic_no": c._topic_no,
+                  "topic_start": c._topic_start,
                   "logs": [asdict(l) for l in c.logs]},
         "messages": S["messages"], "ack": S["ack"], "last": S["last"],
         "last_elicited": S["last_elicited"], "updated": S["updated"],
@@ -184,6 +188,10 @@ def _deserialize(state: dict, sid, session, topic) -> dict:
     cum = cd.get("cum", {})
     c._cum = {e: bool(cum.get(e, False)) for e in ELEMENTS}
     c._turn = int(cd.get("turn", 0))
+    cs = cd.get("cum_session", cum)            # 이전 저장본엔 없음 → 기존 누적으로 대체
+    c._cum_session = {e: bool(cs.get(e, False)) or c._cum[e] for e in ELEMENTS}
+    c._topic_no = int(cd.get("topic_no", 1))
+    c._topic_start = int(cd.get("topic_start", 0))
     c.logs = [TurnLog(**d) for d in cd.get("logs", [])]
     S["messages"] = list(state.get("messages", []))
     S["ack"] = bool(state.get("ack", True))
@@ -298,6 +306,12 @@ def dashboard_data(only_session=None) -> list:
 def _append_log(row: dict):
     from dataclasses import asdict
     new = not os.path.exists(LOGCSV)
+    if not new:   # 열이 바뀐 이전 로그(주제번호·주제전환 없음)는 따로 보관하고 새 파일로 시작
+        with open(LOGCSV, encoding="utf-8-sig") as f:
+            head = f.readline().strip().split(",")
+        if head != LOG_FIELDS:
+            os.replace(LOGCSV, LOGCSV.replace(".csv", time.strftime("_old_%Y%m%d%H%M%S.csv")))
+            new = True
     with open(LOGCSV, "a", newline="", encoding="utf-8-sig") as f:
         w = csv.DictWriter(f, fieldnames=LOG_FIELDS)
         if new:
@@ -376,6 +390,8 @@ def handle_turn(body: dict) -> dict:
              "계기": L.계기, "개입": L.개입, "행위유형": L.행위유형,
              "safety_ok": res["safety"].ok, "category": res["safety"].category,
              "elements": coder.elements(), "turn_elements": turn_el, "pending": blocked,
+             "elements_session": coder.elements_session(), "dim": coder.dim(),
+             "topic_no": L.주제번호, "topic_shift": bool(L.주제전환),
              "ts": time.strftime("%Y-%m-%d %H:%M:%S")}   # 턴별 시각(프로세스 분석용)
     S["transcript"].append(entry)
     _append_transcript({"time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -388,9 +404,11 @@ def handle_turn(body: dict) -> dict:
         # 교사가 답을 넣거나 'AI 허용'을 누르면 학생 폴링(/api/pending)으로 자연스럽게 전달된다.
         # 단 자해·정서위험만은 조용한 대기 대신 '케어' 안내를 보이도록 신호(care)를 준다.
         # (구체 범주명은 노출하지 않는다 — 아이는 자기가 무엇으로 걸렸는지 알 수 없음)
-        return {"status": "waiting", "elements": coder.elements(),
+        return {"status": "waiting", "elements": coder.elements(), "dim": coder.dim(),
+                "topic_shift": bool(L.주제전환),
                 "care": (res["safety"].category == CARE_CATEGORY)}
-    return {"reply": reply, "elements": coder.elements(), "summary": coder.summary()}
+    return {"reply": reply, "elements": coder.elements(), "dim": coder.dim(),
+            "topic_shift": bool(L.주제전환), "summary": coder.summary()}
 
 
 # ---- 교사 개입: 답변 넣어주기 / 사소한 위험 통과(AI 허용) / 학생 폴링 -----------
@@ -457,7 +475,7 @@ def handle_pending(sid, session, token=""):
     if ob:
         reply = ob.pop(0)
         _save_session(sid, session, S)
-        return {"reply": reply, "elements": S["coder"].elements()}
+        return {"reply": reply, "elements": S["coder"].elements(), "dim": S["coder"].dim()}
     return {"reply": None}
 
 
