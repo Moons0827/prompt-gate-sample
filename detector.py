@@ -276,7 +276,7 @@ def deep_safety_llm(text: str, model: Optional[str] = None) -> Optional[SafetyRe
 
 LOG_FIELDS = ["학생ID", "차시", "주제", "턴", "학생발화",
               "상황", "조건", "목적", "대상", "이번턴신규요소수",
-              "행위유형", "개입", "계기", "비고", "주제번호", "주제전환"]
+              "행위유형", "개입", "계기", "비고", "주제번호", "주제전환", "주제내신규요소수"]
 
 
 @dataclass
@@ -285,7 +285,7 @@ class TurnLog:
     상황: int = 0; 조건: int = 0; 목적: int = 0; 대상: int = 0
     이번턴신규요소수: int = 0
     행위유형: str = ""; 개입: str = "없음"; 계기: str = "없음"; 비고: str = ""
-    주제번호: int = 1; 주제전환: int = 0
+    주제번호: int = 1; 주제전환: int = 0; 주제내신규요소수: int = 0
 
 
 class ConversationCoder:
@@ -336,8 +336,11 @@ class ConversationCoder:
                                   category=detected.get("category") or "위험")
 
         # 이번 턴에 '처음' 참이 된 요소만 신규로 계산
-        newly = [e for e in ELEMENTS if detected.get(e) and not self._cum[e]]
-        for e in newly:
+        # newly: 차시 기준 — 예비실험과 같은 정의(계기·행위유형·자발 지표는 이것으로 셈)
+        # newly_topic: 현재 이야기 기준 — 표시등용, 로그에는 '주제내신규요소수'로 따로 남김
+        newly = [e for e in ELEMENTS if detected.get(e) and not self._cum_session[e]]
+        newly_topic = [e for e in ELEMENTS if detected.get(e) and not self._cum[e]]
+        for e in newly_topic:
             self._cum[e] = True
         for e in ELEMENTS:
             if self._cum[e]:
@@ -360,7 +363,8 @@ class ConversationCoder:
         log = TurnLog(학생ID, 차시, 주제, self._turn, utterance,
                       *[int(detected.get(e, False)) for e in ELEMENTS],
                       이번턴신규요소수=len(newly), 행위유형=행위, 계기=계기,
-                      주제번호=self._topic_no, 주제전환=int(shift))
+                      주제번호=self._topic_no, 주제전환=int(shift),
+                      주제내신규요소수=len(newly_topic))
 
         # 개입 기록
         if not safety.ok:
