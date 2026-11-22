@@ -33,6 +33,7 @@ from collections import Counter
 from typing import Optional, Callable
 
 ELEMENTS = ["상황", "조건", "목적", "대상"]
+MIN_SHIFT_CHARS = 6   # 이보다 짧은 발화는 주제 전환으로 보지 않음
 
 # 탐지(=안전 통합) 실 호출이 실패해 mock으로 떨어진 마지막 시각.
 # mock은 안전(risk) 판정을 못 하므로, 이 값이 최근이면 LLM 안전점검이 약화된 상태 → 교사 화면에 경고.
@@ -60,21 +61,29 @@ DETECT_SYSTEM_PROMPT = """너는 초등학교 5·6학년 학생이 AI에게 보�
 - 폭력: 남을 해치려는 의도·협박 / 성: 성적·선정적 / 개인정보: 주소·전화·주민번호·비밀번호 노출 / 괴롭힘: 따돌림·괴롭힘
 맥락으로 판단하고 애매하면 과잉 차단하지 않되, 자해·자살 신호는 조금이라도 의심되면 risk=true.
 
+또한 '이번 학생 발화'가 [현재 주제의 이전 학생 발화]와 다른 새 부탁·질문을 시작하는지 판단하라(new_topic).
+- yes: 앞 이야기와 관련 없는 새 부탁이나 질문을 분명히 시작함 (예: 강아지 훈련 이야기를 하다가 "수학 숙제 좀 도와줘")
+- no: 같은 주제를 이어 가거나, 앞 답에 대한 반응·추가 정보·세부 질문임 (예: "더 쉽게 알려줘", "고마워", "우리 강아지는 3살이야")
+- unsure: 판단이 애매함
+이전 발화가 없으면 no. 조금이라도 애매하면 반드시 unsure로 답한다.
+
 규칙:
 1) 키워드가 아니라 '내용'으로 판단한다. 막연하면 없음(false)으로 본다.
-2) 각 요소는 대화에 한 번이라도 실질적으로 등장했으면 true.
+2) new_topic이 yes이면 네 요소는 '이번 학생 발화'만으로 판정한다.
+   그 밖에는 [현재 주제의 이전 학생 발화]와 이번 발화를 합쳐, 한 번이라도 실질적으로 등장했으면 true.
 3) 반드시 아래 JSON 형식으로만 답한다. 설명 문장을 덧붙이지 않는다.
 
 {"상황": bool, "조건": bool, "목적": bool, "대상": bool,
+ "new_topic": "yes|no|unsure",
  "confidence": 0.0~1.0, "risk": bool,
  "category": "자해·정서위험|폭력|성|개인정보|괴롭힘|없음", "rationale": "한 줄 근거"}"""
 
 
 def _build_user_prompt(history: list[str], utterance: str) -> str:
     hist = "\n".join(f"- {h}" for h in history) if history else "(없음)"
-    return (f"[이전 학생 발화]\n{hist}\n\n"
+    return (f"[현재 주제의 이전 학생 발화]\n{hist}\n\n"
             f"[이번 학생 발화]\n{utterance}\n\n"
-            f"위 대화 전체 기준으로 네 요소의 유무를 판정하라.")
+            f"새 주제 여부(new_topic)와 네 요소의 유무를 판정하라.")
 
 
 def _llm_detect_anthropic(history, utterance, model: str) -> dict:
@@ -112,7 +121,7 @@ def _mock_detect(history, utterance, **_) -> dict:
     found = {e: any(c in text for c in cues) for e, cues in _MOCK_CUES.items()}
     conf = 0.55  # mock은 확신도 낮게 표시 → 사람 확인 플래그 유도
     # mock은 안전 판정을 하지 않는다(키워드 Layer1이 담당) → risk=False
-    return {**found, "confidence": conf, "risk": False, "category": "없음",
+    return {**found, "new_topic": "no", "confidence": conf, "risk": False, "category": "없음",
             "rationale": "MOCK 규칙 기반(연구용 아님)"}
 
 
@@ -150,6 +159,9 @@ def detect_elements(history: list[str], utterance: str,
     # 안전(risk)은 보수적으로: 한 번이라도 위험이면 위험으로 본다
     out["risk"] = any(bool(r.get("risk")) for r in runs)
     out["category"] = next((r.get("category") for r in runs if r.get("risk")), "없음")
+    # 새 주제는 보수적으로: 모든 표본이 yes일 때만 yes
+    tv = [str(r.get("new_topic", "no")).lower() for r in runs]
+    out["new_topic"] = "yes" if all(v == "yes" for v in tv) else ("no" if all(v == "no" for v in tv) else "unsure")
     out["rationale"] = f"self-consistency n={samples}"
     return out
 
@@ -264,7 +276,7 @@ def deep_safety_llm(text: str, model: Optional[str] = None) -> Optional[SafetyRe
 
 LOG_FIELDS = ["학생ID", "차시", "주제", "턴", "학생발화",
               "상황", "조건", "목적", "대상", "이번턴신규요소수",
-              "행위유형", "개입", "계기", "비고"]
+              "행위유형", "개입", "계기", "비고", "주제번호", "주제전환"]
 
 
 @dataclass
@@ -273,6 +285,7 @@ class TurnLog:
     상황: int = 0; 조건: int = 0; 목적: int = 0; 대상: int = 0
     이번턴신규요소수: int = 0
     행위유형: str = ""; 개입: str = "없음"; 계기: str = "없음"; 비고: str = ""
+    주제번호: int = 1; 주제전환: int = 0
 
 
 class ConversationCoder:
@@ -288,7 +301,10 @@ class ConversationCoder:
         self.safety_llm = safety_llm     # Layer 3: LLM 2차 입력 점검 사용 여부
         self.safety = SafetyFilter()
         self._history: list[str] = []
-        self._cum = {e: False for e in ELEMENTS}   # 누적 요소 상태
+        self._cum = {e: False for e in ELEMENTS}   # 누적 요소 상태(현재 주제 기준 — 표시등)
+        self._cum_session = {e: False for e in ELEMENTS}   # 차시 전체 누적(흐린 표시·비교용)
+        self._topic_no = 1                         # 현재 주제 번호
+        self._topic_start = 0                      # 현재 주제가 시작된 발화 위치(_history 인덱스)
         self._turn = 0
         self._last_nudged = False                  # 직전 턴에 넛지가 나갔는가
         self.logs: list[TurnLog] = []
@@ -302,8 +318,18 @@ class ConversationCoder:
 
         safety = self.safety.check(utterance)             # Layer 1: 키워드(입력)
         # 요소 탐지 — 같은 호출에서 안전(risk)까지 함께 판정(턴당 LLM 호출 3→2로 절감)
-        detected = detect_elements(self._history, utterance,
+        detected = detect_elements(self._history[self._topic_start:], utterance,
                                    use_llm=self.use_llm, samples=self.samples)
+
+        # 새 주제 판정 — 확신(yes)일 때만 인정, 애매(unsure)하면 기존 누적 유지.
+        # 첫 발화·짧은 반응("응", "고마워")은 주제 전환으로 보지 않는다.
+        shift = (self._turn > 1
+                 and len(utterance.strip()) >= MIN_SHIFT_CHARS
+                 and str(detected.get("new_topic", "no")).lower() == "yes")
+        if shift:
+            self._topic_no += 1
+            self._topic_start = len(self._history)     # 이번 발화부터 새 주제
+            self._cum = {e: False for e in ELEMENTS}   # 표시등은 새 주제 기준으로 다시 셈
         # Layer 3(LLM 2차 안전): 탐지 호출에 통합됨 → 추가 호출 없이 위험이면 교사 에스컬레이션
         if safety.ok and detected.get("risk"):
             safety = SafetyResult(ok=False, level="escalate",
@@ -313,6 +339,9 @@ class ConversationCoder:
         newly = [e for e in ELEMENTS if detected.get(e) and not self._cum[e]]
         for e in newly:
             self._cum[e] = True
+        for e in ELEMENTS:
+            if self._cum[e]:
+                self._cum_session[e] = True
 
         # 계기: 직전 AI가 되물은 뒤 요소가 늘었으면 '유도', 아니면 '자발'
         if newly:
@@ -330,7 +359,8 @@ class ConversationCoder:
 
         log = TurnLog(학생ID, 차시, 주제, self._turn, utterance,
                       *[int(detected.get(e, False)) for e in ELEMENTS],
-                      이번턴신규요소수=len(newly), 행위유형=행위, 계기=계기)
+                      이번턴신규요소수=len(newly), 행위유형=행위, 계기=계기,
+                      주제번호=self._topic_no, 주제전환=int(shift))
 
         # 개입 기록
         if not safety.ok:
@@ -346,12 +376,20 @@ class ConversationCoder:
         return {"log": log, "safety": safety}
 
     def elements(self) -> dict:
-        """현재 누적된 요소 상태(4개 bool)를 반환. 프런트 요소 표시에 사용."""
+        """현재 주제에서 누적된 요소 상태(4개 bool). 프런트 표시등(밝게)에 사용."""
         return dict(self._cum)
+
+    def dim(self) -> dict:
+        """이전 주제에서는 켜졌지만 현재 주제에서는 아직 안 나온 요소 → 프런트에서 흐리게 표시."""
+        return {e: bool(self._cum_session[e] and not self._cum[e]) for e in ELEMENTS}
+
+    def elements_session(self) -> dict:
+        """차시 전체 누적(주제 무관) — 이전 버전 지표와 비교할 때 사용."""
+        return dict(self._cum_session)
 
     # --- 대화 수준 집계 ----------------------------------------------------
     def summary(self) -> dict:
-        cum = sum(1 for v in self._cum.values() if v)
+        cum = sum(1 for v in self._cum_session.values() if v)
         자발 = sum(l.이번턴신규요소수 for l in self.logs if l.계기 == "자발")
         유도 = sum(l.이번턴신규요소수 for l in self.logs if l.계기 == "유도")
         ratio = 자발 / (자발 + 유도) if (자발 + 유도) else 0.0
