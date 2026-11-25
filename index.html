@@ -70,14 +70,32 @@
     border-radius:10px;margin-bottom:12px;font-family:inherit;}
   .card button{width:100%;padding:11px;background:var(--accent);color:#fff;border:none;
     border-radius:10px;font-size:15px;font-weight:600;cursor:pointer;}
+  .card button:disabled{background:#b8c4bf;cursor:default;}
+  .card .pick{display:flex;flex-wrap:wrap;gap:6px;justify-content:center;margin-bottom:12px;}
+  .card .pick button{width:auto;min-width:56px;padding:9px 12px;background:#fff;color:var(--ink);
+    border:1px solid var(--line);font-weight:600;}
+  .card .pick.nums button{min-width:44px;padding:8px 0;font-size:14px;}
+  .card .pick button.sel{background:var(--accent);color:#fff;border-color:var(--accent);}
+  .card.wide{max-width:420px;}
 </style>
 </head>
 <body>
 <div class="overlay" id="nameOverlay">
   <div class="card">
-    <h2>이름을 알려줘</h2>
-    <p>오늘은 <b>본명</b>으로 적어요. 선생님이 누구 대화인지 알 수 있어요.</p>
-    <input id="nameInput" placeholder="본명 (예: 김민수)" maxlength="20" autofocus>
+    <!-- 명단 입장(고정 학생 계정): 반 → 번호 → (입장 번호) -->
+    <div id="rosterLogin" style="display:none;">
+      <h2>우리 반과 내 번호를 골라줘</h2>
+      <p id="rosterHint">먼저 우리 반을 눌러요.</p>
+      <div id="classBtns" class="pick"></div>
+      <div id="numBtns" class="pick nums" style="display:none;"></div>
+      <input id="pinInput" inputmode="numeric" maxlength="4" placeholder="입장 번호 4자리" style="display:none;">
+    </div>
+    <!-- 이름 입장(명단이 없을 때 — 시연·연수용) -->
+    <div id="nameLogin" style="display:none;">
+      <h2>이름을 알려줘</h2>
+      <p>오늘은 <b>본명</b>으로 적어요. 선생님이 누구 대화인지 알 수 있어요.</p>
+      <input id="nameInput" placeholder="본명 (예: 김민수)" maxlength="20" autofocus>
+    </div>
     <div id="nameErr" style="display:none;font-size:13px;color:#c0392b;margin:-4px 0 12px;"></div>
     <button id="nameOk" disabled>시작하기</button>
   </div>
@@ -86,14 +104,14 @@
   <header>
     <div>
       <div class="title">AI와 함께 이야기하기</div>
-      <div id="lessonSub" style="font-size:12px;color:var(--sub);margin-top:2px;">1차시 · 말을 더하면 답이 달라져요</div>
+      <div id="lessonSub" style="font-size:12px;color:var(--sub);margin-top:2px;"></div>
     </div>
     <div style="display:flex;flex-direction:column;align-items:flex-end;gap:5px;">
       <span class="watch">선생님이 함께 보고 있어요</span>
       <button id="callBtn" style="font-size:12px;padding:5px 11px;border:1px solid var(--line);border-radius:14px;background:#fff;cursor:pointer;">🔔 선생님 부르기</button>
     </div>
   </header>
-  <div class="growth" id="growth">
+  <div class="growth" id="growth" style="display:none;">
     <span class="lead">내 대화가 자라고 있어요</span>
     <span class="dot" data-e="상황"><span class="mark"></span>상황</span>
     <span class="dot" data-e="조건"><span class="mark"></span>조건</span>
@@ -139,27 +157,103 @@ const overlay=document.getElementById("nameOverlay"),
 const nameOk=document.getElementById("nameOk");
 const nameErr=document.getElementById("nameErr");
 const TOKKEY = "pgtok_"+LESSON;              // 본인 재접속(새로고침) 식별용 — 브라우저 세션 한정
+const SIDKEY = "pgsid_"+LESSON;              // 명단 입장 후 새로고침하면 같은 가명 코드로 바로 이어감
 let TOKEN="", KICKED=false;
+let ROSTER=false, CLASSES=[], PICK={cls:"", num:""};
+let LIGHTS=true;                             // 표시등 조건(서버가 알려줌). 꺼진 조건이면 표시줄을 숨김
+
+// ── 입장 방식 고르기: 명단이 있으면 반·번호, 없으면 이름 ─────────────────────
+async function initLogin(){
+  try{ const d=await (await fetch("/api/classes")).json(); CLASSES=d.classes||[]; }catch(e){ CLASSES=[]; }
+  ROSTER = CLASSES.length>0;
+  if(ROSTER){
+    let sid=""; try{ sid=sessionStorage.getItem(SIDKEY)||""; }catch(e){}
+    if(sid){ return join({sid}); }           // 새로고침 → 같은 학생으로 바로 이어감
+    overlay.querySelector(".card").classList.add("wide");
+    document.getElementById("rosterLogin").style.display="block";
+    const box=document.getElementById("classBtns"); box.innerHTML="";
+    CLASSES.forEach(c=>{
+      const b=document.createElement("button"); b.type="button"; b.textContent=c.cid+"반";
+      b.addEventListener("click",()=>pickClass(c, b)); box.appendChild(b);
+    });
+    if(CLASSES.length===1) pickClass(CLASSES[0], box.firstChild);
+  }else{
+    document.getElementById("nameLogin").style.display="block";
+    nameInput.focus();
+  }
+}
+function pickClass(c, btn){
+  PICK={cls:c.cid, num:""};
+  document.querySelectorAll("#classBtns button").forEach(x=>x.classList.toggle("sel", x===btn));
+  const box=document.getElementById("numBtns"); box.innerHTML=""; box.style.display="flex";
+  c.nums.forEach(n=>{
+    const b=document.createElement("button"); b.type="button"; b.textContent=parseInt(n,10);
+    b.addEventListener("click",()=>{
+      PICK.num=n; box.querySelectorAll("button").forEach(x=>x.classList.toggle("sel", x===b));
+      refreshOk();
+    });
+    box.appendChild(b);
+  });
+  const pin=document.getElementById("pinInput");
+  pin.style.display=c.pin?"block":"none"; pin.value="";
+  document.getElementById("rosterHint").textContent=c.pin
+    ? "내 번호를 누르고, 선생님께 받은 입장 번호 4자리를 적어요."
+    : "내 번호를 눌러요. 꼭 내 번호인지 확인해요!";
+  refreshOk();
+}
+function refreshOk(){
+  nameErr.style.display="none";
+  if(ROSTER){
+    const c=CLASSES.find(x=>x.cid===PICK.cls);
+    const pinOk = !c || !c.pin || /^\d{4}$/.test(document.getElementById("pinInput").value.trim());
+    nameOk.disabled = !(PICK.cls && PICK.num && pinOk);
+    nameOk.textContent = (PICK.cls && PICK.num) ? PICK.cls+"반 "+parseInt(PICK.num,10)+"번으로 시작하기" : "시작하기";
+  }else{
+    nameOk.disabled = !nameInput.value.trim();
+  }
+}
+document.getElementById("pinInput").addEventListener("input", refreshOk);
+document.getElementById("pinInput").addEventListener("keydown",e=>{if(e.key==="Enter"&&!nameOk.disabled)startWithName();});
+
 async function startWithName(){
+  if(ROSTER){
+    if(!PICK.cls || !PICK.num) return;
+    return join({cls:PICK.cls, num:PICK.num, pin:document.getElementById("pinInput").value.trim()});
+  }
   const v=nameInput.value.trim();
   if(!v){ nameInput.focus(); return; }       // 본명 필수 — 빈칸이면 시작하지 않음
+  return join({student:v});
+}
+
+async function join(who){
   nameErr.style.display="none"; nameOk.disabled=true; nameOk.textContent="확인 중…";
   let tok=""; try{ tok=sessionStorage.getItem(TOKKEY)||""; }catch(e){}
   try{
     const r=await fetch("/api/join",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({student:v, session:SESSION, token:tok})});
+      body:JSON.stringify({...who, session:SESSION, token:tok})});
     const d=await r.json();
     if(!d.ok){
-      nameErr.textContent=d.error||"지금은 이 이름으로 시작할 수 없어요.";
+      if(who.sid){ try{ sessionStorage.removeItem(SIDKEY); }catch(e){} location.reload(); return; }
+      nameErr.textContent=d.error||"지금은 시작할 수 없어요.";
       nameErr.style.display="block";
-      nameOk.disabled=false; nameOk.textContent="시작하기"; return;
+      refreshOk(); if(!ROSTER) nameOk.textContent="시작하기"; return;
     }
     TOKEN=d.token||""; try{ sessionStorage.setItem(TOKKEY, TOKEN); }catch(e){}
-    STUDENT_ID=v;
+    STUDENT_ID=d.sid || who.student || "";
+    if(ROSTER){ try{ sessionStorage.setItem(SIDKEY, STUDENT_ID); }catch(e){} }
+    setLights(d.lights!==false);
     restoreHistory(d.history||[], d.elements||{}, d.dim||{});   // 지난 대화 화면에 복원
-  }catch(e){ STUDENT_ID=v; }                          // 네트워크 문제면 그냥 진행
-  nameOk.textContent="시작하기";
+  }catch(e){
+    if(ROSTER){ nameErr.textContent="연결이 안 돼요. 잠시 뒤 다시 눌러줘."; nameErr.style.display="block";
+      refreshOk(); return; }
+    STUDENT_ID=who.student||"";                  // 이름 입장: 네트워크 문제면 그냥 진행(예전 동작)
+    setLights(true);
+  }
   overlay.style.display="none"; document.getElementById("input").focus();
+}
+function setLights(on){
+  LIGHTS=!!on;
+  document.getElementById("growth").style.display = LIGHTS ? "" : "none";
 }
 
 function restoreHistory(hist, elems, dim){
@@ -177,11 +271,11 @@ function showKicked(){
   KICKED=true;
   overlay.style.display="flex";
   overlay.querySelector(".card").innerHTML=
-    '<h2>다른 기기에서 접속했어요</h2><p>같은 이름으로 다른 곳에서 접속해서 이 화면은 종료됐어요. 계속하려면 그 기기를 쓰거나, 이 화면을 새로고침해서 다시 들어와요.</p>';
+    '<h2>다른 기기에서 접속했어요</h2><p>같은 번호(이름)로 다른 곳에서 접속해서 이 화면은 종료됐어요. 계속하려면 그 기기를 쓰거나, 이 화면을 새로고침해서 다시 들어와요.</p>';
 }
 nameOk.addEventListener("click",startWithName);
 nameInput.addEventListener("keydown",e=>{if(e.key==="Enter")startWithName();});
-nameInput.addEventListener("input",()=>{ nameOk.disabled = !nameInput.value.trim(); nameErr.style.display="none"; });
+nameInput.addEventListener("input",refreshOk);
 const SEED_SETS = {
   1:["급식 남는 거 줄이는 방법","좋아하는 게임 캐릭터 만들기","강아지 훈련시키는 법"],
   2:["우리 반 규칙 정하기","친구 생일 선물 고르기","방 청소 재밌게 하는 법"],
@@ -227,12 +321,14 @@ function hideTyping(){ waitTimers.forEach(clearTimeout); waitTimers=[];
   if(typingEl){ typingEl.remove(); typingEl=null; } }
 function nudgeBubble(text){const d=document.createElement("div");d.className="nudge";
   d.innerHTML="<b>잠깐!</b> "+text;chat.appendChild(d);chat.scrollTop=chat.scrollHeight;}
-function updateGrowth(elems, dim){document.querySelectorAll("#growth .dot").forEach(el=>{
+function updateGrowth(elems, dim){ if(!LIGHTS) return;   // 표시등 끈 조건: 아무것도 켜지 않음
+  document.querySelectorAll("#growth .dot").forEach(el=>{
   const on=!!(elems&&elems[el.dataset.e]);
   el.classList.toggle("on", on);
   el.classList.toggle("dim", !on && !!(dim&&dim[el.dataset.e]));});}
 let toastTimer=null;
-function topicToast(){const t=document.getElementById("topicToast"); if(!t) return;
+function topicToast(){ if(!LIGHTS) return;
+  const t=document.getElementById("topicToast"); if(!t) return;
   t.classList.add("show"); clearTimeout(toastTimer);
   toastTimer=setTimeout(()=>t.classList.remove("show"), 3000);}
 
@@ -250,16 +346,42 @@ function startCooldown(ms){
   },1000);
 }
 
+// ── 입력 기록(본실험): 예시 버튼, 보내기 전에 고친 횟수, 쓰는 데 걸린 시간 ─────────────
+// 글 내용은 보내는 순간의 것만 서버로 가고, 쓰는 과정은 숫자로만 남긴다.
+let COMP=null;
+function compReset(){ COMP={start:0, inputs:0, revisions:0, deleted:0, pastes:0, lastDel:false,
+                            seedUsed:false, seedText:"", lastLen:0}; }
+compReset();
+input.addEventListener("input", e=>{
+  if(!COMP.start) COMP.start=Date.now();
+  COMP.inputs++;
+  const len=input.value.length;
+  const isDel = (e.inputType||"").startsWith("delete") || len < COMP.lastLen;
+  if(isDel){
+    if(!COMP.lastDel) COMP.revisions++;        // 연속으로 지운 것은 한 번 고친 것으로 셈
+    COMP.deleted += Math.max(0, COMP.lastLen-len);
+  }
+  if((e.inputType||"")==="insertFromPaste") COMP.pastes++;
+  COMP.lastDel=isDel; COMP.lastLen=len;
+});
+function compMeta(){
+  return {seed_used:COMP.seedUsed, seed_text:COMP.seedText, revisions:COMP.revisions,
+          deleted_chars:COMP.deleted, inputs:COMP.inputs, pastes:COMP.pastes,
+          compose_ms: COMP.start ? (Date.now()-COMP.start) : 0};
+}
+
 async function send(){
   if(!STUDENT_ID || cooling || KICKED) return; // 쿨다운·종료 중에는 전송 막음
   const v=input.value.trim(); if(!v) return;
-  input.value=""; sendBtn.disabled=true;
+  const meta=compMeta();
+  input.value=""; sendBtn.disabled=true; compReset();
   bubble("msg me", v);
   try{
     const r=await fetch("/api/turn",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({student_id:STUDENT_ID, session:SESSION, utterance:v, token:TOKEN})});
+      body:JSON.stringify({student_id:STUDENT_ID, session:SESSION, utterance:v, token:TOKEN, meta})});
     const d=await r.json();
     if(d.kicked){ showKicked(); return; }      // 다른 기기가 이어받음
+    if(d.relogin){ try{ sessionStorage.removeItem(SIDKEY); }catch(e){} bubble("sys", d.error); return; }
     if(d.cooldown){                            // 서버가 너무 빠른 전송을 차단
       bubble("sys", d.error || "조금만 천천히 보내요.");
       startCooldown(); return;
@@ -281,15 +403,15 @@ input.addEventListener("keydown",e=>{if(e.key==="Enter"&&!e.shiftKey){e.preventD
 
 function renderSeeds(){const box=document.getElementById("seedChips");box.innerHTML="";
   SEED_SETS[SESSION].forEach(s=>{const c=document.createElement("span");c.className="seed";c.textContent=s;
-    c.addEventListener("click",()=>{input.value=s;input.focus();});box.appendChild(c);});}
+    c.addEventListener("click",()=>{input.value=s;input.focus();
+      if(!COMP.start) COMP.start=Date.now();
+      COMP.seedUsed=true; COMP.seedText=s; COMP.lastLen=s.length;});   // 예시 버튼 사용 기록
+    box.appendChild(c);});}
 
-const LESSON_META={
-  1:"1차시 · 말을 더하면 답이 달라져요",
-  2:"2차시 · 한 번 더 물어 더 좋게",
-  3:"3차시 · 스스로 점검하기",
-  4:"4차시 · 내 질문 습관 만들기"};
-document.getElementById("lessonSub").textContent = LESSON_META[LESSON] || "";
-renderSeeds(); updateGrowth({});
+// 차시 제목은 내용이 드러나지 않게 통일(본실험). 예비실험의 '스스로 점검하기' 같은 제목이
+// 학생 행동을 바꾸는 또 하나의 원인이 될 수 있어서다.
+document.getElementById("lessonSub").textContent = LESSON + "차시";
+renderSeeds(); updateGrowth({}); initLogin();
 
 // 교사가 넣어준 답(또는 'AI 허용'·전체공지) 수신 — 학생은 위험을 전혀 알 수 없이 평범한 답으로 받음
 let awaiting=false;

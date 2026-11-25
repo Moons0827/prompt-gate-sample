@@ -18,6 +18,9 @@ from urllib.parse import urlparse, parse_qs
 from detector import ConversationCoder, NudgePolicy, LOG_FIELDS, SafetyFilter, TurnLog, ELEMENTS
 import llm
 import store
+import roster
+import transfer
+import coding
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC = os.path.join(HERE, "static")
@@ -81,6 +84,22 @@ PAUSED = False
 # 자해·정서위험 범주 — 이 경우엔 학생에게 조용한 대기 대신 따뜻한 '케어' 안내를 보낸다.
 CARE_CATEGORY = "자해·정서위험"
 
+# ---- 본실험(2026-12) 되묻기 규칙 — 시스템이 지킨다 -------------------------------
+# 2차시 점검 요청(조건 check2가 켜진 학생만): 답 끝에 아래 문장 중 하나를 차례로 붙인다.
+CHECK2_PHRASES = [
+    "이 답이 네가 찾던 거 맞아?",
+    "이대로 괜찮아? 더 필요한 게 있으면 말해줘.",
+    "혹시 더 알려주고 싶은 게 있어?",
+]
+# 3차시 점검 한마디: 시스템이 '막힘'을 판정했을 때만 붙인다.
+CHECK3_PHRASE = "보내기 전에 스스로 한번 점검해봤어?"
+# 막힘 판정: 지금 이야기에서 빠진 요소가 남아 있는데, 새 요소 없이 짧은 말(STUCK_SHORT_CHARS자 미만)이
+# STUCK_RUN번 이어지면 막힘. 한 번 점검 한마디가 나간 뒤에는 다시 STUCK_RUN번이 쌓여야 한다.
+STUCK_RUN = int(os.environ.get("STUCK_RUN", 3))
+STUCK_SHORT_CHARS = int(os.environ.get("STUCK_SHORT_CHARS", 15))
+# 2~4차시 답에 질문이 섞이면 다시 생성하는 최대 횟수. 그래도 남으면 질문 문장만 지운다.
+MAX_REGEN = int(os.environ.get("MAX_REGEN", 2))
+
 
 def _cache_put(key, S):
     """세션을 캐시에 넣고 최신으로 표시. 상한을 넘으면 가장 오래된 것부터 내보낸다(영속본은 유지)."""
@@ -119,11 +138,23 @@ def handle_join(body):
        기존 접속(이전 탭/기기)은 폴링에서 kicked 신호를 받아 종료된다.
        과거 대화(transcript)·요소·직접대화를 함께 돌려줘 화면에 그대로 복원한다."""
     import secrets
-    sid = (body.get("student") or "").strip()
     session = int(body.get("session", 1))
     token = (body.get("token") or "").strip()
-    if not sid:
-        return {"ok": False, "error": "이름을 입력해줘."}
+    if roster.has_classes():
+        # 고정 학생 계정 — 학급·번호(·입장 번호)로만 들어온다. 서버에는 가명 코드(A-07)만 남는다.
+        # (새로고침 때는 화면이 기억한 가명 코드로 다시 들어온다.)
+        if body.get("sid") and roster.is_roster_sid(body["sid"]):
+            sid = body["sid"]
+        else:
+            r = roster.resolve_login(body.get("cls"), body.get("num"), body.get("pin", ""))
+            if not r["ok"]:
+                return r
+            sid = r["sid"]
+    else:
+        # 명단이 없을 때(시연·연수용): 예전처럼 이름으로 들어온다.
+        sid = (body.get("student") or "").strip()
+        if not sid:
+            return {"ok": False, "error": "이름을 입력해줘."}
     key = (sid, session)
     now = time.time()
     p = PRESENCE.get(key)
@@ -144,7 +175,11 @@ def handle_join(body):
         elems = S["coder"].elements()
         dim = S["coder"].dim()
         direct = list(S.get("direct", []))
-    return {"ok": True, "token": token, "took_over": took_over,
+    cond = roster.condition_for(sid)
+    if not cond["lights"]:                     # 표시등 끈 조건: 화면에 요소 상태를 보내지 않음
+        elems, dim = {}, {}
+    return {"ok": True, "sid": sid, "token": token, "took_over": took_over,
+            "lights": cond["lights"],
             "history": hist, "elements": elems, "dim": dim, "direct": direct}
 
 
@@ -159,6 +194,8 @@ def _new_session(sid, session, topic):
         "direct": [],          # 학생↔교사 1:1 직접 대화 [{from:'student'|'teacher', text, ts}]
         "call": False,         # 학생이 '선생님 부르기'를 눌렀는가(대시보드에 호출 표시)
         "call_ts": 0,
+        "check2_i": 0,         # 2차시 점검 요청 문장 순번(차례로 돌림)
+        "stuck_last": 0,       # 3차시 점검 한마디가 마지막으로 나간 턴
     }
 
 
@@ -176,6 +213,7 @@ def _serialize(S) -> dict:
         "last_turn_ts": S.get("last_turn_ts", 0), "transcript": S["transcript"],
         "outbox": S.get("outbox", []), "direct": S.get("direct", []),
         "call": S.get("call", False), "call_ts": S.get("call_ts", 0),
+        "check2_i": S.get("check2_i", 0), "stuck_last": S.get("stuck_last", 0),
     }
 
 
@@ -208,6 +246,8 @@ def _deserialize(state: dict, sid, session, topic) -> dict:
     S["direct"] = list(state.get("direct", []))
     S["call"] = bool(state.get("call", False))
     S["call_ts"] = float(state.get("call_ts", 0))
+    S["check2_i"] = int(state.get("check2_i", 0))
+    S["stuck_last"] = int(state.get("stuck_last", 0))
     return S
 
 
@@ -234,7 +274,17 @@ def _dash_row(sid, session, S) -> dict:
         "대화유형": s["대화유형"], "자발비율": s["자발비율"],
         "last": (S.get("last") or "")[:30], "level": level, "reason": reason,
         "updated": S["updated"], "call": bool(S.get("call")),
+        "cond": _cond_short(roster.condition_for(sid)),
     }
+
+
+def _cond_short(c: dict) -> str:
+    """대시보드용 짧은 조건 표시. 예: '표시등○ 점검○'(켬) / '표시등× 점검○'."""
+    if c.get("support") == "always":
+        s = f"계속되묻기 표시등{'○' if c['lights'] else '×'}"
+    else:
+        s = f"표시등{'○' if c['lights'] else '×'} 점검{'○' if c['check2'] else '×'}"
+    return s + ("" if c["assigned"] else " (미배정)")
 
 
 def _save_session(sid, session, S):
@@ -278,6 +328,69 @@ def _asks(text: str) -> bool:
     return tail.endswith(_Q_ENDINGS) or tail.endswith(_INVITE_ENDINGS)
 
 
+_SENT_SPLIT = re.compile(r'(?<=[.!?…~])\s+|\n+')
+
+
+def _strip_questions(text: str) -> str:
+    """질문(되묻기·유도)으로 판정되는 문장만 지운다. 다시 생성해도 질문이 남을 때의 마지막 방어."""
+    sents = [s for s in _SENT_SPLIT.split(text or "") if s.strip()]
+    keep = [s for s in sents if not _asks(s)]
+    return " ".join(keep).strip()
+
+
+def _is_stuck(S) -> bool:
+    """3차시 '막힘' 판정 — 지금 이야기에 빠진 요소가 남아 있고, 최근 STUCK_RUN턴이 모두
+       '새 요소 없음 + 짧은 말'이며, 직전 점검 한마디 뒤로 STUCK_RUN턴 이상 지났을 때."""
+    coder = S["coder"]
+    logs = coder.logs
+    if len(logs) < STUCK_RUN:
+        return False
+    if all(coder.elements().values()):              # 지금 이야기의 네 요소를 다 갖췄으면 막힘 아님
+        return False
+    if coder._turn - S.get("stuck_last", 0) < STUCK_RUN:
+        return False
+    recent = logs[-STUCK_RUN:]
+    return all(l.주제내신규요소수 == 0 and len((l.학생발화 or "").strip()) < STUCK_SHORT_CHARS
+               for l in recent)
+
+
+def _generate_reply(S, session: int, cond: dict) -> tuple:
+    """AI 답 만들기 — 차시 규칙과 조건을 시스템이 지킨다. (reply, gen) 반환.
+       gen은 턴 로그에 그대로 남는다(논문의 조작 점검 근거)."""
+    session = int(session)
+    filled = sum(1 for v in S["coder"].elements().values() if v)
+    sup = cond.get("support", "fade")
+    ans_only = llm.answer_only(session, sup)
+    gen = {"방식": ("계속되묻기" if sup == "always" else ("답만" if ans_only else "되묻기")),
+           "다시생성": 0, "질문막기": "", "덧붙임": "", "막힘": False}
+    reply = llm.chat(S["messages"], filled=filled, session=session, support=sup)
+    if ans_only:
+        # ① 2~4차시: 답에 질문이 섞이면 더 강한 지시로 다시 생성
+        while _asks(reply) and gen["다시생성"] < MAX_REGEN:
+            gen["다시생성"] += 1
+            reply = llm.chat(S["messages"], filled=filled, session=session, strict=True, support=sup)
+        if _asks(reply):
+            stripped = _strip_questions(reply)
+            if stripped:
+                reply, gen["질문막기"] = stripped, "질문문장삭제"
+            else:
+                gen["질문막기"] = "실패"            # 지울 수 없음 → 그대로 두고 기록
+        else:
+            gen["질문막기"] = "다시생성" if gen["다시생성"] else "통과"
+        # ② 시스템이 붙이는 점검 한마디
+        if session == 2 and cond.get("check2"):
+            i = S.get("check2_i", 0)
+            gen["덧붙임"] = CHECK2_PHRASES[i % len(CHECK2_PHRASES)]
+            S["check2_i"] = i + 1
+        elif session == 3 and _is_stuck(S):
+            gen["덧붙임"] = CHECK3_PHRASE
+            gen["막힘"] = True
+            S["stuck_last"] = S["coder"]._turn
+        if gen["덧붙임"]:
+            reply = (reply.rstrip() + " " + gen["덧붙임"]).strip()
+    return reply, gen
+
+
 def compute_status(S: dict) -> tuple:
     """학생 상태를 3단계로 분류: 즉시(안전) / 주의(학습위험) / 로그(정상)."""
     coder = S["coder"]; logs = coder.logs
@@ -298,6 +411,7 @@ def dashboard_data(only_session=None) -> list:
     now = time.time()
     for r in rows:
         r["ago"] = int(now - r.get("updated", now))
+        r["cond"] = _cond_short(roster.condition_for(r.get("student_id", "")))   # 늘 현재 조건으로
     order = {"즉시": 0, "주의": 1, "로그": 2}
     rows.sort(key=lambda r: (order.get(r.get("level", "로그"), 2), r["ago"]))
     return rows
@@ -327,21 +441,26 @@ def handle_turn(body: dict) -> dict:
     if not utterance:
         return {"error": "빈 발화"}
 
+    # 명단을 쓰는 동안에는 명단에 있는 가명 코드로만 대화한다(이름을 바꿔 새 학생이 생기는 것 방지)
+    if roster.has_classes() and not roster.is_roster_sid(sid):
+        return {"error": "다시 들어와줘. (화면을 새로고침하고 반과 번호를 골라줘)", "relogin": True}
+
     # 다른 기기가 같은 이름으로 이어받았으면 이 탭은 종료
     if _is_kicked(sid, session, (body.get("token") or "").strip()):
         return {"kicked": True}
 
     S = _get_session(sid, session, topic)
+    cond = roster.condition_for(sid)            # 이 학생의 실험 조건(매 턴 로그에 남김)
     _touch_presence(sid, session)   # 이 이름이 아직 접속 중임을 갱신
 
     # 관리자 비상 정지 — 새 턴을 처리하지 않고 안내만
     if PAUSED:
         return {"reply": "지금은 잠깐 쉬는 시간이야. 선생님 안내를 기다려줘!",
-                "elements": S["coder"].elements(), "paused": True}
+                **_lights_payload(S, cond), "paused": True}
     # 학생당 턴 상한 — 비용 폭주·도배 방지(초과 시 LLM 호출 없이 부드럽게 멈춤)
     if S["coder"]._turn >= MAX_STUDENT_TURNS:
         return {"reply": "오늘 정말 많이 이야기했다! 잠깐 쉬었다가 선생님이 안내해줄 거야.",
-                "elements": S["coder"].elements(), "capped": True}
+                **_lights_payload(S, cond), "capped": True}
 
     # 연속 전송 방지: 마지막 전송 후 COOLDOWN_SEC 이내면 처리하지 않음(서버측 강제)
     now = time.time()
@@ -352,6 +471,14 @@ def handle_turn(body: dict) -> dict:
     S["last_turn_ts"] = now
 
     coder, messages = S["coder"], S["messages"]
+
+    # 학생이 이 말을 쓰는 동안 보고 있던 표시등 상태(진하게·흐리게·없음). 표시등 끈 조건은 '꺼짐'.
+    _on, _dim = coder.elements(), coder.dim()
+    lights_before = {e: ("진하게" if _on[e] else "흐리게" if _dim[e] else "없음") for e in ELEMENTS}
+    if not cond["lights"]:
+        lights_before = {e: "꺼짐" for e in ELEMENTS}
+    ai_asked_prev = bool(S["last_elicited"])
+    meta = _clean_meta(body.get("meta") or {}, utterance)
 
     # 직전 AI가 되물었는지를 이번 턴 계기 판정에 사용
     # (coder.step 안에서 Layer1 키워드 + Layer3 LLM 2차로 입력 안전을 점검)
@@ -364,9 +491,9 @@ def handle_turn(body: dict) -> dict:
     S["last"] = utterance
 
     reply = None
+    gen = {}
     if res["safety"].ok:
-        filled = sum(1 for v in coder.elements().values() if v)
-        reply = llm.chat(messages, filled=filled, session=int(session))
+        reply, gen = _generate_reply(S, int(session), cond)   # 차시 규칙·조건을 시스템이 지킴
         out_sf = SafetyFilter().check(reply or "")     # Layer 2: AI 출력 안전 점검
         if not out_sf.ok:
             reply = None                               # 위험 출력 차단 → 교사 호출
@@ -392,7 +519,17 @@ def handle_turn(body: dict) -> dict:
              "elements": coder.elements(), "turn_elements": turn_el, "pending": blocked,
              "elements_session": coder.elements_session(), "dim": coder.dim(),
              "topic_no": L.주제번호, "topic_shift": bool(L.주제전환),
-             "ts": time.strftime("%Y-%m-%d %H:%M:%S")}   # 턴별 시각(프로세스 분석용)
+             "ts": time.strftime("%Y-%m-%d %H:%M:%S"),    # 턴별 시각(프로세스 분석용)
+             # ---- 본실험 기록 보강 ----
+             "cond": {"lights": cond["lights"], "check2": cond["check2"],
+                      "support": cond.get("support", "fade"),
+                      "unit": cond["unit"], "assigned": cond["assigned"]},
+             "lights_before": lights_before,             # 이 말을 쓰는 동안 본 표시등
+             "ai_asked_prev": ai_asked_prev,             # 직전 AI 답이 되묻기였나
+             "ai_asks": bool(reply) and _asks(reply),    # 이번 AI 답(최종)이 되묻기인가
+             "gen": gen,                                  # 생성 방식·다시 생성·덧붙인 점검·막힘
+             "new_topic_elems": L.주제내신규요소수,
+             **meta}                                      # 예시 버튼·고친 횟수·쓰는 시간
     S["transcript"].append(entry)
     _append_transcript({"time": time.strftime("%Y-%m-%d %H:%M:%S"),
                         "student_id": sid, "session": int(session), **entry})
@@ -404,11 +541,40 @@ def handle_turn(body: dict) -> dict:
         # 교사가 답을 넣거나 'AI 허용'을 누르면 학생 폴링(/api/pending)으로 자연스럽게 전달된다.
         # 단 자해·정서위험만은 조용한 대기 대신 '케어' 안내를 보이도록 신호(care)를 준다.
         # (구체 범주명은 노출하지 않는다 — 아이는 자기가 무엇으로 걸렸는지 알 수 없음)
-        return {"status": "waiting", "elements": coder.elements(), "dim": coder.dim(),
-                "topic_shift": bool(L.주제전환),
+        return {"status": "waiting", **_lights_payload(S, cond, L),
                 "care": (res["safety"].category == CARE_CATEGORY)}
-    return {"reply": reply, "elements": coder.elements(), "dim": coder.dim(),
-            "topic_shift": bool(L.주제전환), "summary": coder.summary()}
+    return {"reply": reply, **_lights_payload(S, cond, L)}
+
+
+def _lights_payload(S, cond, L=None) -> dict:
+    """학생 화면에 보낼 표시등 정보. 표시등 끈 조건이면 아무것도 보내지 않는다
+       (요소 판정은 서버에서 그대로 돌고 로그에 남는다)."""
+    if not cond["lights"]:
+        return {"lights": False}
+    out = {"lights": True, "elements": S["coder"].elements(), "dim": S["coder"].dim()}
+    if L is not None:
+        out["topic_shift"] = bool(L.주제전환)
+    return out
+
+
+def _clean_meta(m: dict, utterance: str) -> dict:
+    """학생 화면이 보낸 입력 기록(예시 버튼·고친 횟수·쓰는 시간)을 검증해 정리."""
+    def _int(v, hi):
+        try:
+            return max(0, min(int(v), hi))
+        except Exception:
+            return None
+    seed = (m.get("seed_text") or "")[:100] if m.get("seed_used") else ""
+    return {
+        "seed_used": bool(m.get("seed_used")),            # 이번 말을 쓰는 동안 예시 버튼을 눌렀나
+        "seed_text": seed,                                # 누른 예시 문구
+        "seed_exact": bool(seed) and utterance.strip() == seed.strip(),   # 예시를 그대로 보냈나
+        "revisions": _int(m.get("revisions"), 10000),     # 보내기 전에 지운 횟수(연속으로 지운 것은 1번)
+        "deleted_chars": _int(m.get("deleted_chars"), 100000),
+        "compose_ms": _int(m.get("compose_ms"), 3600_000),  # 처음 쓰기 시작해서 보내기까지 걸린 시간
+        "inputs": _int(m.get("inputs"), 100000),          # 입력 이벤트 수
+        "pastes": _int(m.get("pastes"), 1000),            # 붙여넣기 횟수
+    }
 
 
 # ---- 교사 개입: 답변 넣어주기 / 사소한 위험 통과(AI 허용) / 학생 폴링 -----------
@@ -426,13 +592,16 @@ def _lookup_session(sid, session):
     return None
 
 
-def _deliver_reply(sid, session, reply_text, kind):
+def _deliver_reply(sid, session, reply_text, kind, gen=None):
     """교사 답변/허용을 세션에 반영하고, 학생 폴링(/api/pending)으로 전달할 슬롯에 넣는다."""
     S = _get_session(sid, session, "자유")
     tr = S["transcript"]
     target = next((e for e in reversed(tr) if e.get("pending")), None)
     if target is not None:                      # 대기 중이던 차단 턴을 교사 답으로 채움
         target["ai"] = reply_text; target["pending"] = False; target["개입"] = kind
+        target["ai_asks"] = _asks(reply_text)
+        if gen is not None:
+            target["gen"] = gen
     else:                                        # 대기 턴이 없을 때의 일반 개입 — 새 항목
         tr.append({"turn": (tr[-1]["turn"] + 1 if tr else 1), "student": "(선생님 개입)",
                    "ai": reply_text, "계기": "없음", "개입": kind, "safety_ok": True,
@@ -456,9 +625,9 @@ def handle_teacher_reply(sid, session, text):
 def handle_allow_ai(sid, session):
     """사소한 위험 → 교사 판단으로 통과. AI가 정상적으로 답하게 만들어 학생에게 전달."""
     S = _get_session(sid, session, "자유")
-    filled = sum(1 for v in S["coder"].elements().values() if v)
-    reply = llm.chat(S["messages"], filled=filled, session=int(session))  # 교사 승인 → 안전 재검사 생략
-    _deliver_reply(sid, session, reply, "교사허용")
+    # 교사 승인 → 안전 재검사 생략. 차시 규칙·조건은 평소와 똑같이 시스템이 지킨다.
+    reply, gen = _generate_reply(S, int(session), roster.condition_for(sid))
+    _deliver_reply(sid, session, reply, "교사허용", gen=gen)
     return {"ok": True}
 
 
@@ -475,7 +644,7 @@ def handle_pending(sid, session, token=""):
     if ob:
         reply = ob.pop(0)
         _save_session(sid, session, S)
-        return {"reply": reply, "elements": S["coder"].elements(), "dim": S["coder"].dim()}
+        return {"reply": reply, **_lights_payload(S, roster.condition_for(sid))}
     return {"reply": None}
 
 
@@ -567,9 +736,57 @@ def _export_bytes(fmt, only_session, anon=True):
     scope = "전체" if only_session is None else f"{only_session}차시"
     tag = "실명" if not anon else "익명"
     # 익명화 매핑: 스코프 내 모든 실명 → S01… (내보내기 종류가 달라도 같은 번호 → 파일 간 연결 가능)
+    # 명단 학생(A-07 같은 가명 코드)은 이미 실명이 아니므로 그대로 둔다 → 차시·내보내기마다 같은 코드.
     ids = sorted({r["student_id"] for r in rows} | {s.get("student_id") for s in sums})
+    ids = [i for i in ids if i and not roster.parse_sid(i)[0]]
     alias = {sid: f"S{i:02d}" for i, sid in enumerate(ids, 1)}
     nm = (lambda sid: sid) if not anon else (lambda sid: alias.get(sid, sid))
+
+    if fmt == "roster":
+        # 학생별 조건 배정표(입장 번호 제외) — 분석 때 턴 로그와 '학생' 열로 붙인다.
+        buf = io.StringIO(); buf.write("﻿"); w = _csv.writer(buf)
+        cols = ["학생", "학급", "번호", "배정단위", "표시등", "점검요청", "지원방식", "배정됨", "씨앗"]
+        w.writerow(cols)
+        for r in roster.export_rows():
+            w.writerow([r[c] for c in cols])
+        return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", f"조건배정표_{stamp}.csv"
+
+    if fmt == "transfer":
+        # 전이 과제 응답 — 조건 배정표와 '학생' 열로 붙는다. 자동 판정은 사람 코딩 비교용.
+        buf = io.StringIO(); buf.write("\ufeff"); w = _csv.writer(buf)
+        conds = {r["학생"]: r for r in roster.export_rows()}
+        w.writerow(["학생", "학급", "지원방식", "표시등", "점검요청", "회차", "문항", "문항제목", "제출시각",
+                    "응답", "글자수", "쓰기시간초", "고친횟수", "지운글자수", "붙여넣기",
+                    "자동_상황", "자동_조건", "자동_목적", "자동_대상", "자동_위험"])
+        for r in transfer.all_responses():
+            c = conds.get(r["sid"], {})
+            a = r.get("auto") or {}
+            cms = r.get("compose_ms")
+            w.writerow([r["sid"], c.get("학급", ""), c.get("지원방식", ""), c.get("표시등", ""),
+                        c.get("점검요청", ""), transfer.WAVE_LABEL.get(r["wave"], r["wave"]), r["item"],
+                        r.get("title", ""), r.get("ts", ""), r.get("text", ""), len(r.get("text") or ""),
+                        "" if cms is None else round(cms / 1000, 1),
+                        "" if r.get("revisions") is None else r["revisions"],
+                        "" if r.get("deleted_chars") is None else r["deleted_chars"],
+                        "" if r.get("pastes") is None else r["pastes"],
+                        *[("" if e not in a else int(bool(a[e]))) for e in ELEMENTS],
+                        "" if "risk" not in a else int(bool(a["risk"]))])
+        return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", f"전이과제_{stamp}.csv"
+    if fmt == "coding_sheet":
+        body = coding.sheet_csv()
+        return body, "text/csv; charset=utf-8", f"이중코딩_시트_{stamp}.csv"
+    if fmt == "coding_key":
+        body = coding.key_csv()
+        return body, "text/csv; charset=utf-8", f"이중코딩_대응표_관리자보관_{stamp}.csv"
+    if fmt == "coding_disagree":
+        body = coding.disagree_csv()
+        return body, "text/csv; charset=utf-8", f"이중코딩_불일치합의시트_{stamp}.csv"
+    if fmt == "coding_final":
+        body = coding.final_csv()
+        return body, "text/csv; charset=utf-8", f"이중코딩_최종코드_관리자보관_{stamp}.csv"
+    if fmt == "coding_report":
+        body = coding.report_csv()
+        return body, "text/csv; charset=utf-8", f"이중코딩_일치도_{stamp}.csv"
 
     if fmt == "json":
         data = []
@@ -578,7 +795,11 @@ def _export_bytes(fmt, only_session, anon=True):
             data.append({"student_id": nm(r["student_id"]), "session": r["session"],
                          "topic": r.get("topic"), "transcript": st.get("transcript", [])})
         body = json.dumps({"exported": time.strftime("%Y-%m-%d %H:%M:%S"),
-                           "scope": scope, "anonymized": anon, "count": len(data), "sessions": data},
+                           "scope": scope, "anonymized": anon, "count": len(data),
+                           "conditions": roster.export_rows(),          # 학생별 조건 배정(입장 번호 제외)
+                           "assignment_log": roster.admin_view()["audit"],
+                           "transfer": transfer.all_responses(),       # 전이 과제 응답(조건은 conditions와 학생으로 연결)
+                           "sessions": data},
                           ensure_ascii=False, indent=2).encode("utf-8")
         return body, "application/json; charset=utf-8", f"로그원본_{scope}_{tag}_{stamp}.json"
     if fmt == "summary":
@@ -604,20 +825,85 @@ def _export_bytes(fmt, only_session, anon=True):
         return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", f"사람코딩서식_{scope}_{tag}_{stamp}.csv"
     # 기본: 턴별 코딩(기계) — 사람코딩서식과 열 이름이 같아 validate.py로 바로 대조 가능
     buf = io.StringIO(); buf.write("﻿"); w = _csv.writer(buf)
+    # 앞 15열은 예전과 같고(validate.py·기존 분석 스크립트 호환), 본실험 기록은 그 뒤에 붙는다.
     w.writerow(["학생","차시","턴","시각","학생발화","AI응답",
-                "상황","조건","목적","대상","계기","개입","행위유형","안전OK","위험범주"])
+                "상황","조건","목적","대상","계기","개입","행위유형","안전OK","위험범주",
+                "학급","배정단위","조건_표시등","조건_점검요청","조건배정됨",
+                "주제번호","주제전환","주제내신규요소수",
+                "직전AI되묻기","AI되묻기",
+                "표시등_상황","표시등_조건","표시등_목적","표시등_대상",
+                "예시버튼","예시문구","예시그대로","고친횟수","지운글자수","쓰기시간초","입력횟수","붙여넣기",
+                "생성방식","다시생성","질문막기","덧붙인점검","막힘판정","조건_지원방식"])
+    def _b(v):
+        return "" if v is None else int(bool(v))
     for r in rows:
         st = r.get("state") or {}
+        cid = roster.parse_sid(r["student_id"])[0] or ""
         for t in st.get("transcript", []):
             # 이번 턴 탐지 요소 우선, 구(舊)데이터는 누적 요소로 폴백
             e = t.get("turn_elements") or t.get("elements", {}) or {}
+            c = t.get("cond") or {}
+            lb = t.get("lights_before") or {}
+            g = t.get("gen") or {}
+            cms = t.get("compose_ms")
             w.writerow([nm(r["student_id"]), r["session"], t.get("turn"), t.get("ts") or "",
                         t.get("student") or "", t.get("ai") or "",
                         int(bool(e.get("상황"))), int(bool(e.get("조건"))),
                         int(bool(e.get("목적"))), int(bool(e.get("대상"))),
                         t.get("계기"), t.get("개입"), t.get("행위유형") or "",
-                        t.get("safety_ok"), t.get("category") or ""])
+                        t.get("safety_ok"), t.get("category") or "",
+                        cid,
+                        {"class": "학급", "student": "학생", "none": "명단밖"}.get(c.get("unit"), ""),
+                        _b(c.get("lights")), _b(c.get("check2")), _b(c.get("assigned")),
+                        t.get("topic_no", ""), _b(t.get("topic_shift")), t.get("new_topic_elems", ""),
+                        _b(t.get("ai_asked_prev")), _b(t.get("ai_asks")),
+                        lb.get("상황", ""), lb.get("조건", ""), lb.get("목적", ""), lb.get("대상", ""),
+                        _b(t.get("seed_used")), t.get("seed_text") or "", _b(t.get("seed_exact")),
+                        "" if t.get("revisions") is None else t.get("revisions"),
+                        "" if t.get("deleted_chars") is None else t.get("deleted_chars"),
+                        "" if cms is None else round(cms / 1000, 1),
+                        "" if t.get("inputs") is None else t.get("inputs"),
+                        "" if t.get("pastes") is None else t.get("pastes"),
+                        g.get("방식", ""), g.get("다시생성", ""), g.get("질문막기", ""),
+                        g.get("덧붙임", ""), _b(g.get("막힘")) if g else "",
+                        {"always": "계속되묻기", "fade": "단계적감소"}.get(c.get("support"), "단계적감소" if c else "")])
     return buf.getvalue().encode("utf-8"), "text/csv; charset=utf-8", f"턴별코딩_{scope}_{tag}_{stamp}.csv"
+
+
+# ---------------------------------------------------------------------------
+# 지원 없는 전이 과제
+# ---------------------------------------------------------------------------
+def handle_transfer_login(body: dict) -> dict:
+    if not roster.has_classes():
+        return {"ok": False, "error": "아직 반 명단이 없어. 선생님께 여쭤 봐."}
+    if body.get("sid") and roster.is_roster_sid(body["sid"]):
+        sid = body["sid"]
+    else:
+        r = roster.resolve_login(body.get("cls"), body.get("num"), body.get("pin", ""))
+        if not r["ok"]:
+            return r
+        sid = r["sid"]
+    return {**transfer.student_view(sid), "sid": sid}
+
+
+def handle_transfer_submit(body: dict) -> dict:
+    sid = (body.get("student") or "").strip()
+    text = (body.get("text") or "").strip()
+    meta = _clean_meta(body.get("meta") or {}, text)
+    auto = {}
+    if text and roster.is_roster_sid(sid):
+        try:   # 사람 코딩과 비교하려고 자동 코더 판정도 남긴다(학생에게는 보이지 않음)
+            from detector import detect_elements
+            r = detect_elements([], text)
+            auto = {e: bool(r.get(e)) for e in ELEMENTS}
+            auto["risk"] = bool(r.get("risk"))
+            auto["category"] = r.get("category") or ""
+        except Exception as e:
+            print("[transfer] 자동 판정 실패:", e)
+    out = transfer.submit(sid, body.get("wave"), body.get("item"), text, meta, auto)
+    if out.get("ok"):
+        out.update(transfer.student_view(sid))
+    return out
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -670,6 +956,24 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/s" or path.startswith("/s/"):
             n = self._lesson_from(path, "/s")
             return self._serve_templated("index.html", {"__LESSON__": str(n)})
+
+        # 지원 없는 전이 과제 — /t (AI 답·표시등 없음, 관리자가 연 회차만)
+        if path in ("/t", "/t/"):
+            return self._serve_templated("transfer.html", {})
+        if path == "/api/transfer/view":
+            q = parse_qs(urlparse(self.path).query)
+            sid = (q.get("student") or [""])[0]
+            if not roster.is_roster_sid(sid):
+                return self._send(200, {"ok": False, "error": "반과 번호로 다시 들어와 줘."})
+            return self._send(200, transfer.student_view(sid))
+        if path == "/api/admin/transfer":
+            if role != "admin":
+                return self._send(403, {"error": "관리자만 볼 수 있습니다."})
+            return self._send(200, transfer.admin_view())
+        if path == "/api/admin/coding":
+            if role != "admin":
+                return self._send(403, {"error": "관리자만 볼 수 있습니다."})
+            return self._send(200, coding.status())
 
         # 교사 대시보드 — /teacher/<n> (교사/관리자 코드 필요, 그 차시만)
         if path == "/teacher" or path.startswith("/teacher/"):
@@ -733,6 +1037,12 @@ class Handler(BaseHTTPRequestHandler):
                              "attachment; filename*=UTF-8''" + quote(fname))
             self.send_header("Content-Length", str(len(body)))
             self.end_headers(); self.wfile.write(body); return
+        if path == "/api/classes":               # 학생 입장 화면 — 반 목록·번호(조건·입장 번호는 숨김)
+            return self._send(200, {"classes": roster.public_classes()})
+        if path == "/api/admin/roster":          # 관리자 — 명단·입장 번호·조건·배정 기록
+            if role != "admin":
+                return self._send(403, {"error": "관리자만 볼 수 있습니다."})
+            return self._send(200, roster.admin_view())
         if path == "/api/whoami":
             return self._send(200, {"role": role or "none"})
         if path == "/logout":
@@ -788,6 +1098,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, handle_join(body))
             if path == "/api/turn":                        # 학생: 코드 불필요
                 return self._send(200, handle_turn(body))
+            if path == "/api/transfer/login":              # 학생: 전이 과제 입장
+                return self._send(200, handle_transfer_login(body))
+            if path == "/api/transfer/submit":             # 학생: 전이 과제 제출
+                return self._send(200, handle_transfer_submit(body))
             if path == "/api/call":                        # 학생: 선생님 호출벨
                 sid = (body.get("student") or "").strip()
                 sess = int(body.get("session", 1))
@@ -803,6 +1117,51 @@ class Handler(BaseHTTPRequestHandler):
             role = self._role()
             if role not in ("admin", "teacher"):
                 return self._send(403, {"error": "권한이 필요합니다."})
+
+            # ---- 학급 명단·실험 조건 (관리자만) ----
+            if path.startswith("/api/admin/"):
+                if role != "admin":
+                    return self._send(403, {"error": "관리자만 바꿀 수 있습니다."})
+                act = path[len("/api/admin/"):]
+                b = body
+                def _opt_bool(k):
+                    return None if b.get(k) is None else bool(b.get(k))
+                def _seed():
+                    v = b.get("seed")
+                    return None if v in (None, "") else int(v)
+                if act == "class_create":
+                    return self._send(200, roster.create_class(b.get("cid"), b.get("n"),
+                                                               b.get("unit", "class"), bool(b.get("pin"))))
+                if act == "class_delete":
+                    return self._send(200, roster.delete_class(b.get("cid")))
+                if act == "class_resize":
+                    return self._send(200, roster.resize_class(b.get("cid"), b.get("n")))
+                if act == "class_set":
+                    return self._send(200, roster.set_class(b.get("cid"), b.get("unit"),
+                                                            _opt_bool("lights"), _opt_bool("check2"),
+                                                            _opt_bool("pin"), b.get("support")))
+                if act == "student_set":
+                    return self._send(200, roster.set_student(b.get("cid"), b.get("num"),
+                                                              _opt_bool("lights"), _opt_bool("check2"),
+                                                              b.get("support")))
+                if act == "randomize_students":
+                    return self._send(200, roster.randomize_students(b.get("cid"), _seed(),
+                                                                     bool(b.get("include_always"))))
+                if act == "transfer_open":
+                    return self._send(200, transfer.set_open(b.get("wave"), bool(b.get("on"))))
+                if act == "transfer_items":
+                    return self._send(200, transfer.set_items(b.get("wave"), b.get("items")))
+                if act == "coding_build":
+                    return self._send(200, coding.build(b.get("n_turns", 150), _seed(),
+                                                        b.get("kinds") or None))
+                if act == "coding_upload":
+                    return self._send(200, coding.upload(b.get("coder"), b.get("csv") or ""))
+                if act == "coding_clear":
+                    return self._send(200, coding.clear_codes(b.get("coder")))
+                if act == "randomize_classes":
+                    return self._send(200, roster.randomize_classes(b.get("cids") or None, _seed(),
+                                                                    bool(b.get("include_always"))))
+                return self._send(404, {"error": "not found"})
             if path == "/api/ack":                         # 교사: 알림 확인 처리
                 sid = body.get("student_id"); sess = int(body.get("session", 1))
                 S = _get_session(sid, sess, "자유")
