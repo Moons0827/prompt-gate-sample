@@ -200,7 +200,8 @@ async function load(){
       : `<span class="view">대화 보기</span>`;
     tr.innerHTML =
       `<td class="state">${r.call?'🔔 ':''}${stateLabel}</td>`+
-      `<td>${r.call?'<b style="color:var(--now)">'+r.student_id+'</b>':r.student_id}</td>`+
+      `<td>${r.call?'<b style="color:var(--now)">'+r.student_id+'</b>':r.student_id}`+
+        (r.cond?`<div style="font-size:11px;color:var(--sub);white-space:nowrap;">${r.cond}</div>`:"")+`</td>`+
       `<td>${r.session}차시</td>`+
       `<td>${r.topic}</td>`+
       `<td>${r.turns}</td>`+
@@ -238,7 +239,12 @@ async function openTranscript(sid, session){
     }else if(t.ai){
       html+=`<div class="a">${escapeHtml(t.ai)}</div>`;
     }
-    html+=`<div class="tags">턴 ${t.turn} · 요소[${els}] · 계기:${t["계기"]} · 개입:${t["개입"]}</div>`;
+    const g=t.gen||{};
+    const extra=(g["덧붙임"]?` · 시스템 점검: "${escapeHtml(g["덧붙임"])}"`:"")+
+                (g["다시생성"]?` · 다시 생성 ${g["다시생성"]}회`:"")+
+                (t.seed_used?` · 예시 버튼${t.seed_exact?"(그대로)":""}`:"")+
+                (t.revisions?` · 고친 횟수 ${t.revisions}`:"");
+    html+=`<div class="tags">턴 ${t.turn} · 요소[${els}] · 계기:${t["계기"]} · 개입:${t["개입"]}${extra}</div>`;
     wrap.innerHTML=html; body.appendChild(wrap);
   });
   startDirect(sid, session);   // 1:1 직접 대화 로드/폴링 시작

@@ -30,6 +30,12 @@
   .toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#2b2b2b;color:#fff;
     font-size:13px;padding:8px 14px;border-radius:8px;opacity:0;transition:.2s;pointer-events:none;}
   .toast.on{opacity:1;}
+  .box{margin-top:18px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;font-size:13px;}
+  .row input,.row select,td select{font-size:13px;padding:5px 7px;border:1px solid var(--line);border-radius:7px;font-family:inherit;}
+  .sw{font-size:12.5px;white-space:nowrap;margin-right:8px;}
+  .warn{color:#b4453a;font-size:12px;}
+  @media print{ body *{visibility:hidden;} #printArea,#printArea *{visibility:visible;} #printArea{position:absolute;left:0;top:0;} }
 </style>
 </head>
 <body>
@@ -62,6 +68,89 @@
     <button id="bcastBtn" style="font-size:13px;padding:7px 14px;border:1px solid var(--line);border-radius:8px;background:#fff;cursor:pointer;">📢 전체 공지</button>
   </div>
 
+  <!-- ── 학급 명단(고정 학생 계정)과 실험 조건(2×2) ───────────────────────── -->
+  <div class="box" id="rosterBox">
+    <div style="font-weight:700;margin-bottom:4px;">학급 명단과 실험 조건</div>
+    <div style="font-size:12.5px;color:var(--sub);margin-bottom:10px;line-height:1.6;">
+      학급을 만들면 학생은 이름 대신 <b>반과 번호</b>를 골라 들어옵니다. 서버에는 <b>가명 코드(예: A-07)</b>만 남고,
+      번호와 실명의 대응표는 담임 선생님이 따로 보관합니다. 학급이 하나라도 있으면 이름으로는 들어올 수 없습니다.<br>
+      조건은 두 가지입니다. <b>표시등</b>(상황·조건·목적·대상 점등을 학생 화면에 보이기)과
+      <b>2차시 점검 요청</b>(2차시 AI 답 끝에 "이 답이 네가 찾던 거 맞아?" 같은 한마디 붙이기). 배정 단위는 학급마다 고릅니다.<br>
+      <b>지원 방식</b>은 기본이 <b>단계적 감소</b>(1차시만 되묻고 2~4차시는 답만)입니다. 비교 조건이 필요하면 <b>계속 되묻기</b>(1~4차시 내내 1차시처럼 직접 되묻기)로 바꿀 수 있고,
+      이때 2차시 점검 요청은 쓰지 않습니다. 무선 배정에서 '계속 되묻기 포함'을 고르면 다섯 조건(2×2 + 계속 되묻기)으로 나눕니다.
+    </div>
+    <div class="row">
+      <label>학급 코드 <input id="nCid" placeholder="예: A" maxlength="8" style="width:70px;"></label>
+      <label>학생 수 <input id="nN" type="number" min="1" max="60" value="25" style="width:64px;"></label>
+      <label>배정 단위
+        <select id="nUnit"><option value="class">학급 단위</option><option value="student">학생 단위</option></select></label>
+      <label><input type="checkbox" id="nPin"> 입장 번호 사용</label>
+      <button class="btn pri" id="nCreate">학급 만들기</button>
+    </div>
+    <table style="margin-top:10px;">
+      <thead><tr><th>학급</th><th>인원</th><th>배정 단위</th><th>조건</th><th>입장 번호</th><th></th></tr></thead>
+      <tbody id="classRows"><tr><td colspan="6" style="color:var(--sub);">아직 학급이 없습니다(지금은 이름으로 입장).</td></tr></tbody>
+    </table>
+    <div class="row" style="margin-top:10px;">
+      <span style="font-size:12.5px;color:var(--sub);">학급 단위 학급들에 네 조건을 고르게 무선 배정</span>
+      <input id="cSeed" placeholder="씨앗(비우면 자동)" style="width:130px;">
+      <button class="btn" id="randClasses">학급 무선 배정</button>
+      <label style="font-size:12.5px;"><input type="checkbox" id="incAlways"> 계속 되묻기 조건 포함(다섯 조건, 학급·학생 배정 모두)</label>
+    </div>
+    <div id="rosterDetail" style="display:none;margin-top:14px;"></div>
+    <details style="margin-top:12px;"><summary style="font-size:12.5px;color:var(--sub);cursor:pointer;">배정 기록(최근)</summary>
+      <div id="auditBox" style="font-size:12px;color:var(--sub);margin-top:6px;line-height:1.7;"></div></details>
+  </div>
+
+  <!-- ── 지원 없는 전이 과제 ───────────────────────────────────────────── -->
+  <div class="box" id="transferBox" style="margin-top:18px;">
+    <div style="font-weight:700;margin-bottom:4px;">지원 없는 전이 과제</div>
+    <div style="font-size:12.5px;color:var(--sub);margin-bottom:10px;line-height:1.6;">
+      학생은 <b><span id="tLink"></span></b>에서 반·번호로 들어와, AI의 답과 표시등 없이 상황 카드를 보고 'AI에게 보낼 첫 질문'만 써서 냅니다.
+      회차를 열어야 들어올 수 있고, 한 번에 한 회차만 여는 것을 권합니다. 세 회차의 카드는 상황만 다르고 담을 수 있는 정보의 종류와 양이 같습니다.
+      응답이 생긴 회차의 카드는 고칠 수 없습니다.
+    </div>
+    <table><thead><tr><th>회차</th><th>열기</th><th>카드와 응답 수</th><th></th></tr></thead><tbody id="tRows"></tbody></table>
+    <div id="tEdit" style="display:none;margin-top:10px;">
+      <div style="font-size:12.5px;color:var(--sub);margin-bottom:4px;">카드 고치기(JSON). facts는 학생에게 보이는 사실, key는 코더용 채점 기준입니다.</div>
+      <textarea id="tEditText" style="width:100%;height:220px;font-family:monospace;font-size:12px;"></textarea>
+      <div class="row"><button class="btn pri" id="tSave">저장</button><button class="btn" id="tCancel">닫기</button></div>
+    </div>
+    <div class="row" style="margin-top:10px;"><a class="btn" href="/api/export?fmt=transfer">전이 과제 응답 CSV</a></div>
+  </div>
+
+  <!-- ── 이중 코딩 ───────────────────────────────────────────────────── -->
+  <div class="box" id="codingBox" style="margin-top:18px;">
+    <div style="font-weight:700;margin-bottom:4px;">이중 코딩(사람 두 명)과 일치도</div>
+    <div style="font-size:12.5px;color:var(--sub);margin-bottom:10px;line-height:1.6;">
+      ① 코딩 시트를 만들면 각 학생·차시의 <b>첫 발화 전부</b>, 그 뒤 발화 가운데 <b>무작위 표본</b>, <b>전이 과제 응답 전부</b>가 섞인 순서로 들어갑니다.
+      시트에는 학생·차시·조건·자동 판정이 <b>모두 가려져</b> 있습니다(코더는 어느 조건의 발화인지 모름).<br>
+      ② 같은 시트를 두 코더(A, B)에게 따로 주고, 상황·조건·목적·대상 칸에 1(있음) 또는 0(없음)을 적게 합니다.<br>
+      ③ 돌려받은 CSV를 코더별로 올리면 A·B 사이 κ와, 사람과 자동 코더 사이 κ·F1을 계산합니다. <b>대응표</b>는 관리자만 보관하세요.<br>
+      ④ A·B가 다르게 본 발화는 <b>불일치 합의 시트</b>로 내려받아 두 사람이 함께 정한 뒤 코더 <b>C</b>로 올립니다. 그러면 <b>최종 코드 CSV</b>가 완성되고, 이 파일을 <code>python analysis.py</code>에 넣어 사전 등록한 분석을 돌립니다.
+    </div>
+    <div class="row">
+      <label>대화 중 발화 표본 수 <input id="kN" type="number" min="0" max="2000" value="150" style="width:70px;"></label>
+      <input id="kSeed" placeholder="씨앗(비우면 자동)" style="width:130px;">
+      <button class="btn pri" id="kBuild">코딩 시트 만들기</button>
+      <span id="kInfo" style="font-size:12.5px;color:var(--sub);"></span>
+    </div>
+    <div class="row" style="margin-top:6px;">
+      <a class="btn" href="/api/export?fmt=coding_sheet">코딩 시트 CSV(코더에게 줌)</a>
+      <a class="btn" href="/api/export?fmt=coding_key">대응표 CSV(관리자 보관)</a>
+      <a class="btn" href="/api/export?fmt=coding_report">일치도 CSV</a>
+      <a class="btn" href="/api/export?fmt=coding_disagree">불일치 합의 시트 CSV</a>
+      <a class="btn" href="/api/export?fmt=coding_final">최종 코드 CSV(관리자 보관)</a>
+    </div>
+    <div class="row" style="margin-top:6px;">
+      <label>코더 <select id="kCoder"><option>A</option><option>B</option><option value="C">C(합의)</option></select></label>
+      <input type="file" id="kFile" accept=".csv,text/csv">
+      <button class="btn" id="kUp">코딩 결과 올리기</button>
+      <span id="kUpInfo" style="font-size:12.5px;color:var(--sub);"></span>
+    </div>
+    <div id="kReport" style="margin-top:10px;overflow-x:auto;"></div>
+  </div>
+
   <div style="margin-top:18px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px;">
     <div style="font-weight:700;margin-bottom:8px;">로그 다운로드</div>
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
@@ -75,6 +164,7 @@
       <a class="btn" id="dlSummary">학생별 요약 CSV</a>
       <a class="btn" id="dlJson">원본 JSON</a>
       <a class="btn" id="dlTemplate">사람 코딩용 빈 서식</a>
+      <a class="btn" id="dlRoster" href="/api/export?fmt=roster">조건 배정표 CSV</a>
       <label style="font-size:13px;color:var(--sub);margin-left:6px;">
         <input type="checkbox" id="realName"> 실명 포함</label>
     </div>
@@ -86,17 +176,19 @@
     · <b>학생</b>에게는 해당 차시의 <b>학생용 링크</b>만 보내세요(코드 없이 그 차시로 바로 들어갑니다).<br>
     · <b>교사</b>에게는 해당 차시의 <b>대시보드 링크 + 교사 코드</b>를 주세요(그 차시만 보입니다).<br>
     · 이 관리자 화면(1~4차시 전체)은 관리자 코드로만 열립니다.<br>
-    · 1차시는 완성본, 2~4차시는 AI 도우미 특성 초안 상태입니다.
+    · 학생 화면의 차시 제목은 모두 'AI와 이야기하기 1~4'로 같습니다. 아래 설명은 관리자에게만 보입니다.<br>
+    · 2~4차시 AI는 질문 없이 답만 하고(질문이 섞이면 시스템이 다시 생성), 2차시 점검 요청과 3차시 점검 한마디는 시스템이 붙입니다.
   </div>
 </div>
 <div class="toast" id="toast">링크를 복사했어요</div>
+<div id="printArea"></div>
 
 <script>
 const META={
-  1:{t:"1차시 · 말을 더하면 답이 달라져요", ready:true},
-  2:{t:"2차시 · 한 번 더 물어 더 좋게", ready:false},
-  3:{t:"3차시 · 스스로 점검하기", ready:false},
-  4:{t:"4차시 · 내 질문 습관 만들기", ready:false},
+  1:{t:"1차시 · AI가 빠진 정보를 하나씩 되물음", ready:true},
+  2:{t:"2차시 · 답만 + 점검 요청 한마디(조건이 켜진 학생만)", ready:true},
+  3:{t:"3차시 · 답만 + 막혔을 때만 점검 한마디", ready:true},
+  4:{t:"4차시 · 답만(질문 없음)", ready:true},
 };
 const origin=location.origin;
 const tb=document.getElementById("rows");
@@ -148,6 +240,225 @@ document.getElementById("pauseBtn").addEventListener("click", async ()=>{
   refreshPause();
 });
 refreshPause();
+
+// ── 학급 명단과 실험 조건 ───────────────────────────────────────────────
+const LBL = (lt,ck,sup)=> sup==="always" ? `계속 되묻기 · 표시등 ${lt?"켬":"끔"}` : `표시등 ${lt?"켬":"끔"} · 점검 요청 ${ck?"켬":"끔"}`;
+const SUPSEL = (v,attr,dis)=>`<select ${attr} ${dis?"disabled":""}><option value="fade" ${v!=="always"?"selected":""}>단계적 감소</option><option value="always" ${v==="always"?"selected":""}>계속 되묻기</option></select>`;
+const incAlways = ()=>document.getElementById("incAlways").checked;
+let RV=null, OPEN="";
+function esc(s){return String(s??"").replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+async function api(act, payload){
+  const r=await fetch("/api/admin/"+act,{method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(payload||{})});
+  const d=await r.json();
+  if(d.error){ alert(d.error); }
+  return d;
+}
+async function loadRoster(){
+  try{ RV=await (await fetch("/api/admin/roster")).json(); }catch(e){ return; }
+  const tb=document.getElementById("classRows");
+  if(!RV.classes.length){
+    tb.innerHTML='<tr><td colspan="6" style="color:var(--sub);">아직 학급이 없습니다(지금은 이름으로 입장).</td></tr>';
+  }else{
+    tb.innerHTML="";
+    RV.classes.forEach(c=>{
+      const tr=document.createElement("tr");
+      let cond="";
+      if(c.unit==="class"){
+        const lt=c.cond.lights, ck=c.cond.check2, sup=c.cond.support||"fade";
+        cond = `<label class="sw">지원 방식 ${SUPSEL(sup,'data-a="support"',false)}</label><br>`+
+               `<label class="sw"><input type="checkbox" data-a="lights" ${lt?"checked":""}> 표시등</label>`+
+               `<label class="sw"><input type="checkbox" data-a="check2" ${ck&&sup!=="always"?"checked":""} ${sup==="always"?"disabled":""}> 2차시 점검 요청</label>`+
+               ((lt===null||ck===null)?'<span class="warn">미배정(지금은 둘 다 켬으로 운영)</span>':"");
+      }else{
+        const parts=Object.entries(c.counts).map(([k,v])=>`${esc(k)} ${v}명`).join("<br>");
+        cond = `<div style="font-size:12px;line-height:1.5;">${parts}</div>`+
+               `<button class="btn" data-a="randStu">학생 무선 배정</button>`+
+               (c.student_seed!=null?`<span style="font-size:11.5px;color:var(--sub);">씨앗 ${c.student_seed}</span>`:"");
+      }
+      tr.innerHTML=
+        `<td class="lesson">${esc(c.cid)}반</td>`+
+        `<td>${c.n}명</td>`+
+        `<td><select data-a="unit"><option value="class" ${c.unit==="class"?"selected":""}>학급 단위</option>`+
+          `<option value="student" ${c.unit==="student"?"selected":""}>학생 단위</option></select></td>`+
+        `<td>${cond}</td>`+
+        `<td><label class="sw"><input type="checkbox" data-a="pin" ${c.pin?"checked":""}> 사용</label></td>`+
+        `<td><button class="btn" data-a="open">명단·입장 카드</button>`+
+          `<button class="btn" data-a="del" style="color:#b4453a;">삭제</button></td>`;
+      tr.addEventListener("change", async e=>{
+        const a=e.target.dataset.a; if(!a) return;
+        if(a==="unit"){
+          if(!confirm(`${c.cid}반의 배정 단위를 '${e.target.value==="class"?"학급":"학생"} 단위'로 바꿀까요?\n이미 대화한 학생이 있으면 조건이 섞이니 실험 전에만 바꾸세요.`)){ loadRoster(); return; }
+          await api("class_set",{cid:c.cid, unit:e.target.value});
+        }else if(a==="support"){
+          await api("class_set",{cid:c.cid, support:e.target.value,
+            lights: tr.querySelector('[data-a=lights]').checked,
+            check2: e.target.value==="always" ? false : tr.querySelector('[data-a=check2]').checked});
+        }else if(a==="lights"||a==="check2"){
+          // 두 칸을 함께 보낸다 → 하나만 눌러도 '배정됨'이 된다(안 누른 칸은 화면에 보이는 대로 끔)
+          await api("class_set",{cid:c.cid,
+            lights: tr.querySelector('[data-a=lights]').checked,
+            check2: tr.querySelector('[data-a=check2]').checked});
+        }else if(a==="pin"){
+          await api("class_set",{cid:c.cid, pin:e.target.checked});
+        }
+        loadRoster();
+      });
+      tr.addEventListener("click", async e=>{
+        const a=e.target.dataset.a;
+        if(a==="del"){
+          if(!confirm(`${c.cid}반 명단을 지울까요? (대화 기록은 남지만, 이 반 학생은 더 들어올 수 없어요)`)) return;
+          await api("class_delete",{cid:c.cid}); if(OPEN===c.cid) OPEN=""; loadRoster();
+        }else if(a==="randStu"){
+          const s=prompt("씨앗(같은 배정을 다시 만들 때 쓰는 숫자). 비우면 자동으로 정해요.","");
+          if(s===null) return;
+          const k=incAlways()?"다섯":"네";
+          if(!confirm(`${c.cid}반 학생 ${c.n}명을 ${k} 조건에 무선 배정할까요? 지금 배정은 바뀝니다.`)) return;
+          const d=await api("randomize_students",{cid:c.cid, seed:s.trim(), include_always:incAlways()});
+          if(d.ok) alert("배정했어요. 씨앗: "+d.seed);
+          OPEN=c.cid; loadRoster();
+        }else if(a==="open"){
+          OPEN = OPEN===c.cid ? "" : c.cid; renderDetail();
+        }
+      });
+      tb.appendChild(tr);
+    });
+  }
+  renderDetail();
+  document.getElementById("auditBox").innerHTML = (RV.audit||[]).slice().reverse().slice(0,20)
+    .map(a=>`${esc(a.ts)} · ${esc(a.action)} · ${esc(JSON.stringify(Object.fromEntries(Object.entries(a).filter(([k])=>!["ts","action"].includes(k)))))}`).join("<br>") || "기록 없음";
+}
+function renderDetail(){
+  const box=document.getElementById("rosterDetail");
+  const c=(RV&&RV.classes||[]).find(x=>x.cid===OPEN);
+  if(!c){ box.style.display="none"; box.innerHTML=""; return; }
+  box.style.display="block";
+  const stu = c.unit==="student";
+  let h=`<div class="row" style="justify-content:space-between;"><b>${esc(c.cid)}반 명단</b>`+
+        `<span><button class="btn" id="printCards">입장 카드 인쇄</button>`+
+        `<label class="sw">학생 수 <input id="rsN" type="number" min="1" max="60" value="${c.n}" style="width:60px;"></label>`+
+        `<button class="btn" id="rsBtn">인원 바꾸기</button></span></div>`;
+  if(!stu) h+=`<div style="font-size:12px;color:var(--sub);margin:4px 0;">학급 단위라 학생 모두 '${LBL(!!c.cond.lights,!!c.cond.check2,c.cond.support)}'로 운영됩니다. 학생별 조건은 학생 단위일 때만 바꿀 수 있어요.</div>`;
+  h+=`<table><thead><tr><th>번호</th><th>가명 코드</th><th>입장 번호</th><th>지원 방식</th><th>표시등</th><th>2차시 점검 요청</th></tr></thead><tbody>`;
+  c.students.forEach(s=>{
+    h+=`<tr data-num="${s.num}"><td>${parseInt(s.num,10)}</td><td>${esc(s.sid)}</td><td>${c.pin?esc(s.pin):'<span style="color:var(--sub)">안 씀</span>'}</td>`+
+       `<td>${SUPSEL(s.support,'data-k="support"',!stu)}</td>`+
+       `<td><input type="checkbox" data-k="lights" ${s.lights?"checked":""} ${stu?"":"disabled"}></td>`+
+       `<td><input type="checkbox" data-k="check2" ${s.check2?"checked":""} ${(stu&&s.support!=="always")?"":"disabled"}>`+
+       `${s.assigned?"":' <span class="warn">미배정</span>'}</td></tr>`;
+  });
+  h+=`</tbody></table>`;
+  box.innerHTML=h;
+  box.querySelectorAll("tbody input[type=checkbox], tbody select[data-k=support]").forEach(cb=>cb.addEventListener("change", async e=>{
+    const num=e.target.closest("tr").dataset.num;
+    const tr=e.target.closest("tr");
+    const sup=tr.querySelector('[data-k=support]').value;
+    await api("student_set",{cid:c.cid, num, support:sup,
+      lights: tr.querySelector('[data-k=lights]').checked,
+      check2: sup==="always" ? false : tr.querySelector('[data-k=check2]').checked});
+    loadRoster();
+  }));
+  document.getElementById("rsBtn").addEventListener("click", async ()=>{
+    const n=document.getElementById("rsN").value;
+    if(!confirm(`${c.cid}반 인원을 ${n}명으로 바꿀까요? 줄이면 뒤 번호부터 지워져요.`)) return;
+    await api("class_resize",{cid:c.cid, n}); loadRoster();
+  });
+  document.getElementById("printCards").addEventListener("click", ()=>printCards(c));
+}
+function printCards(c){
+  // 학생에게 나눠 줄 입장 카드(조건은 적지 않음). 번호↔실명 대응은 담임이 카드에 손으로 적어 나눠 주면 된다.
+  const pa=document.getElementById("printArea");
+  pa.innerHTML=`<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;padding:10px;font-family:inherit;">`+
+    c.students.map(s=>`<div style="border:1px dashed #999;padding:12px;font-size:14px;line-height:1.7;">`+
+      `<b>${esc(c.cid)}반 ${parseInt(s.num,10)}번</b><br>이름: ____________<br>`+
+      (c.pin?`입장 번호: <b style="font-size:17px;letter-spacing:2px;">${esc(s.pin)}</b><br>`:"")+
+      `<span style="font-size:11px;color:#666;">${esc(location.origin)}/s/차시번호</span></div>`).join("")+`</div>`;
+  window.print();
+}
+document.getElementById("nCreate").addEventListener("click", async ()=>{
+  const cid=document.getElementById("nCid").value.trim();
+  const n=document.getElementById("nN").value;
+  if(!cid){ document.getElementById("nCid").focus(); return; }
+  const d=await api("class_create",{cid, n, unit:document.getElementById("nUnit").value,
+    pin:document.getElementById("nPin").checked});
+  if(d.ok){ document.getElementById("nCid").value=""; OPEN=cid; }
+  loadRoster();
+});
+document.getElementById("randClasses").addEventListener("click", async ()=>{
+  const pool=(RV&&RV.classes||[]).filter(c=>c.unit==="class").map(c=>c.cid);
+  if(!pool.length){ alert("학급 단위 학급이 없어요."); return; }
+  const k=incAlways()?"다섯":"네";
+  if(!confirm(`학급 단위 학급 ${pool.length}개(${pool.join(", ")})에 ${k} 조건을 무선 배정할까요? 지금 배정은 바뀝니다.`)) return;
+  const d=await api("randomize_classes",{seed:document.getElementById("cSeed").value.trim(), include_always:incAlways()});
+  if(d.ok) alert("배정했어요. 씨앗: "+d.seed+"\n"+Object.entries(d.result).map(([k,v])=>k+"반: "+v).join("\n"));
+  loadRoster();
+});
+loadRoster();
+
+// ── 전이 과제 ──────────────────────────────────────────────────────────
+let TV=null, TEDIT=null;
+document.getElementById("tLink").textContent=location.origin+"/t";
+async function loadTransfer(){
+  try{ TV=await (await fetch("/api/admin/transfer")).json(); }catch(e){ return; }
+  const tb=document.getElementById("tRows"); tb.innerHTML="";
+  ["pre","post","delay"].forEach(w=>{
+    const items=TV.items[w]||[], cnt=TV.counts[w]||{};
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td class="lesson">${TV.labels[w]}</td>`+
+      `<td><label class="sw"><input type="checkbox" data-w="${w}" ${TV.open[w]?"checked":""}> ${TV.open[w]?"열림":"닫힘"}</label></td>`+
+      `<td style="font-size:12.5px;">${items.map(it=>`${esc(it.title)} <b>${cnt[it.id]||0}</b>명`).join("<br>")}</td>`+
+      `<td><button class="btn" data-e="${w}">카드 보기·고치기</button></td>`;
+    tb.appendChild(tr);
+  });
+}
+document.getElementById("tRows").addEventListener("change", async e=>{
+  const w=e.target.dataset.w; if(!w) return;
+  const others=Object.entries(TV.open).filter(([k,v])=>v&&k!==w).map(([k])=>TV.labels[k]);
+  if(e.target.checked && others.length && !confirm(`${others.join(", ")} 회차가 열려 있어요. 함께 열면 학생에게는 앞 회차가 먼저 보여요. 계속할까요?`)){ loadTransfer(); return; }
+  await api("transfer_open",{wave:w, on:e.target.checked}); loadTransfer();
+});
+document.getElementById("tRows").addEventListener("click", e=>{
+  const w=e.target.dataset.e; if(!w) return;
+  TEDIT=w; document.getElementById("tEdit").style.display="block";
+  document.getElementById("tEditText").value=JSON.stringify(TV.items[w],null,2);
+});
+document.getElementById("tCancel").addEventListener("click",()=>{document.getElementById("tEdit").style.display="none";});
+document.getElementById("tSave").addEventListener("click", async ()=>{
+  let items; try{ items=JSON.parse(document.getElementById("tEditText").value); }catch(e){ alert("JSON 형식이 맞지 않아요."); return; }
+  const d=await api("transfer_items",{wave:TEDIT, items});
+  if(d.ok){ document.getElementById("tEdit").style.display="none"; loadTransfer(); }
+});
+loadTransfer();
+
+// ── 이중 코딩 ──────────────────────────────────────────────────────────
+async function loadCoding(){
+  let K; try{ K=await (await fetch("/api/admin/coding")).json(); }catch(e){ return; }
+  const sh=K.sheet;
+  document.getElementById("kInfo").textContent = sh.total
+    ? `시트 ${sh.total}개(첫 발화 ${sh.by_kind.first}, 대화 중 ${sh.by_kind.turn}, 전이 ${sh.by_kind.transfer}) · ${sh.created} · 씨앗 ${sh.seed}`
+    : "아직 시트가 없습니다.";
+  document.getElementById("kUpInfo").textContent = `올린 결과: A ${K.coded.A}개${K.uploaded.A?" ("+K.uploaded.A+")":""}, B ${K.coded.B}개${K.uploaded.B?" ("+K.uploaded.B+")":""}, C(합의) ${K.coded.C||0}개 · 불일치 ${K.disagree||0}개 중 합의 남음 ${K.unresolved||0}개`;
+  const rows=K.report||[];
+  if(!rows.length || !(K.coded.A||K.coded.B)){ document.getElementById("kReport").innerHTML=""; return; }
+  const head=Object.keys(rows[0]);
+  document.getElementById("kReport").innerHTML=`<table><thead><tr>${head.map(h=>`<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>`+
+    rows.map(r=>`<tr>${head.map(h=>`<td>${r[h]==null?"–":esc(r[h])}</td>`).join("")}</tr>`).join("")+`</tbody></table>`;
+}
+document.getElementById("kBuild").addEventListener("click", async ()=>{
+  if(!confirm("코딩 시트를 새로 만들까요? 이미 올린 코딩 결과는 새 시트와 맞지 않아 지워집니다.")) return;
+  const d=await api("coding_build",{n_turns:document.getElementById("kN").value, seed:document.getElementById("kSeed").value.trim()});
+  if(d.ok) alert(`시트를 만들었어요: ${d.total}개 (씨앗 ${d.seed})`);
+  loadCoding();
+});
+document.getElementById("kUp").addEventListener("click", async ()=>{
+  const f=document.getElementById("kFile").files[0]; if(!f){ alert("CSV 파일을 골라 주세요."); return; }
+  const buf=await f.arrayBuffer(); let text;
+  try{ text=new TextDecoder("utf-8",{fatal:true}).decode(buf); }catch(e){ text=new TextDecoder("euc-kr").decode(buf); }  // 엑셀 저장(CP949)도 읽음
+  const d=await api("coding_upload",{coder:document.getElementById("kCoder").value, csv:text});
+  if(d.ok) alert(`코더 ${d.coder}: ${d.rows}개를 읽었어요.`+(d.skipped_blank?` 빈칸·알 수 없는 값 ${d.skipped_blank}개는 뺐어요.`:"")+(d.unknown_id?` 시트에 없는 ID ${d.unknown_id}개.`:""));
+  loadCoding();
+});
+loadCoding();
 
 // 전체 공지(브로드캐스트)
 document.getElementById("bcastBtn").addEventListener("click", async ()=>{
