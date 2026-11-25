@@ -222,7 +222,7 @@ def delete(sid, session):
 
 # ---------------------------------------------------------------------------
 # 설정 저장소 — 학급 명단·실험 조건처럼 '대화와 별개로' 오래 남아야 하는 값
-#   · Postgres: pg_config 테이블(key → jsonb)
+#   · Postgres: app_config 테이블(key → jsonb)
 #   · 메모리 백엔드: logs/config.json 파일(로컬 실행에서도 재시작 후 유지)
 # 대화 초기화(clear)와 무관하게 남는다 — 실습 초기화를 눌러도 명단·조건은 지워지지 않는다.
 # ---------------------------------------------------------------------------
@@ -241,9 +241,9 @@ def get_config(key, default=None, strict=False):
     """strict=True면 읽기 실패 시 예외를 그대로 올린다(호출측이 '없음'과 '읽기 실패'를 구분하도록)."""
     try:
         if _USE_PG:
-            _pg_exec("""CREATE TABLE IF NOT EXISTS pg_config (
+            _pg_exec("""CREATE TABLE IF NOT EXISTS app_config (
                           key text PRIMARY KEY, value jsonb, updated double precision)""")
-            r = _pg_exec("SELECT value FROM pg_config WHERE key=%s", (key,), fetch="one")
+            r = _pg_exec("SELECT value FROM app_config WHERE key=%s", (key,), fetch="one")
             return r[0] if r else default
         return _file_cfg_all().get(key, default)
     except Exception as e:
@@ -256,9 +256,9 @@ def get_config(key, default=None, strict=False):
 def put_config(key, value) -> bool:
     try:
         if _USE_PG:
-            _pg_exec("""CREATE TABLE IF NOT EXISTS pg_config (
+            _pg_exec("""CREATE TABLE IF NOT EXISTS app_config (
                           key text PRIMARY KEY, value jsonb, updated double precision)""")
-            _pg_exec("""INSERT INTO pg_config (key, value, updated) VALUES (%s,%s,%s)
+            _pg_exec("""INSERT INTO app_config (key, value, updated) VALUES (%s,%s,%s)
                         ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated=EXCLUDED.updated""",
                      (key, json.dumps(value, ensure_ascii=False), time.time()))
             return True
